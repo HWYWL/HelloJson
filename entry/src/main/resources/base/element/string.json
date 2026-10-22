@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "JSON 可视化与编辑"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "HelloJson 主界面"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "HelloJson"
+    }
+  ]
+}
