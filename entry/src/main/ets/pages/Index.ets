@@ -3,7 +3,6 @@ import { util } from '@kit.ArkTS';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { pasteboard } from '@kit.BasicServicesKit';
-import { componentSnapshot } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { promptAction } from '@kit.ArkUI';
 import { http } from '@kit.NetworkKit';
@@ -11,18 +10,19 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { JKind, JValue } from '../core/JValue';
 import { jsonParser, ParseResult } from '../core/JsonParser';
 import { stringifyJson, sortKeysDeep, escapeWholeText, unescapeWholeText } from '../core/JsonWriter';
-import { GraphData, GraphTheme, darkTheme, lightTheme } from '../core/GraphModel';
+import { GraphData, GraphTheme, darkTheme, lightTheme, rowColor } from '../core/GraphModel';
 import { GraphBuilder } from '../core/GraphBuilder';
 import { treeLayout } from '../core/TreeLayout';
-import { RenderState, renderGraph, hitTest, HitResult, findNodeByPath } from '../view/GraphRenderer';
+import { RenderState, renderGraph, hitTest, HitResult } from '../view/GraphRenderer';
 import { computeBounds } from '../core/EdgeGeometry';
 import { jqEngine, JqResult } from '../core/JqEngine';
 import { jsonPathEngine, JPathResult } from '../core/JsonPathEngine';
 import { schemaGenerator, typeGenerator } from '../core/CodeGen';
-import { jsonToYaml, yamlToJson, jsonToCsv, csvToJson, jsonToXml, xmlToJson, searchJson, SearchHit } from '../core/Convert';
+import { jsonToYaml, yamlToJson, jsonToCsv, csvToJson, jsonToXml, xmlToJson } from '../core/Convert';
 import { buildSvg } from '../core/SvgExport';
 import { AppConfig, configStore } from '../core/Storage';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { KeyCode } from '@kit.InputKit';
 
 const SAMPLE: string = `{
   "name": "HelloJson",
@@ -87,10 +87,13 @@ const SAMPLE_XML: string = `<?xml version="1.0" encoding="UTF-8"?>
 class HSpan {
   text: string = '';
   color: string = '';
+  /** 查找命中背景色，空串表示无背景 */
+  bg: string = '';
 
-  constructor(text: string, color: string) {
+  constructor(text: string, color: string, bg: string = '') {
     this.text = text;
     this.color = color;
+    this.bg = bg;
   }
 }
 
@@ -113,8 +116,8 @@ struct Index {
   @State errorLine: number = 0;
   @State nodeCount: number = 0;
   @State edgeCount: number = 0;
-  @State darkMode: boolean = true;
-  @State layoutDir: string = 'RIGHT';
+  @State darkMode: boolean = false;
+  @State layoutDir: string = 'DOWN';
   @State viewMode: string = 'graph';
   @State zoomText: string = '100%';
   @State selectedPath: string = '';
@@ -127,7 +130,10 @@ struct Index {
   @State outputText: string = '';
   @State genLanguage: string = 'typescript';
   @State targetFormat: string = 'yaml';
-  @State hitCount: number = 0;
+  @State findVisible: boolean = false;
+  @State findQuery: string = '';
+  @State findIndex: number = 0;
+  @State findTotal: number = 0;
   @State stackVertical: boolean = true;
   @State treeItems: TreeItem[] = [];
   @State busy: boolean = false;
@@ -143,7 +149,13 @@ struct Index {
   private root: JValue | null = null;
   private collapsed: Set<string> = new Set<string>();
   private treeCollapsed: Set<string> = new Set<string>();
-  private hitPaths: Set<string> = new Set<string>();
+  /** 文本查找命中位置（字符偏移，升序） */
+  private findMatches: number[] = [];
+  private textScroller: Scroller = new Scroller();
+  private textContentH: number = 0;
+  private textViewH: number = 0;
+  /** 片段版本号，变化时强制重建 Span（查找高亮切换用） */
+  private spanSeq: number = 0;
   private offsetX: number = 0;
   private offsetY: number = 0;
   private zoomLevel: number = 1;
@@ -308,8 +320,9 @@ struct Index {
       return;
     }
     const t = this.theme();
+    this.spanSeq++;
     if (this.jsonText.length > 40000) {
-      this.spans = [new HSpan(this.jsonText, t.text)];
+      this.spans = this.decorateSpans([new HSpan(this.jsonText, t.text)], t);
       return;
     }
     const out: HSpan[] = [];
@@ -379,7 +392,176 @@ struct Index {
       out.push(new HSpan(text.substring(i, j), t.dimText));
       i = j;
     }
-    this.spans = out;
+    this.spans = this.decorateSpans(out, t);
+  }
+
+  /** ---------- 文本查找（浏览器风格） ---------- */
+
+  /** 打开查找栏，并切到高亮视图（TextArea 无法做局部高亮） */
+  private openFind(): void {
+    if (!this.showEditor) {
+      this.showEditor = true;
+    }
+    if (!this.highlighted) {
+      this.highlighted = true;
+      this.refreshHighlight();
+    }
+    this.samplePicker = false;
+    this.findVisible = true;
+    this.doFind(true);
+  }
+
+  /** 读取修饰键状态（不同键盘布局/版本下键名大小写不一致，两种都试） */
+  private modState(e: KeyEvent, key: string): boolean {
+    if (e.getModifierKeyState === undefined) {
+      return false;
+    }
+    try {
+      return e.getModifierKeyState([key]);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  /** 全局快捷键：Ctrl+F 打开查找，Esc 关闭查找 */
+  private onGlobalKey(e: KeyEvent): void {
+    if (e.type !== KeyType.Down) {
+      return;
+    }
+    const ctrl = this.modState(e, 'Ctrl') || this.modState(e, 'ctrl');
+    if (ctrl && e.keyCode === KeyCode.KEYCODE_F) {
+      this.openFind();
+      e.stopPropagation();
+      return;
+    }
+    if (this.findVisible && e.keyCode === KeyCode.KEYCODE_ESCAPE) {
+      this.closeFind();
+      e.stopPropagation();
+    }
+  }
+
+  private closeFind(): void {
+    this.findVisible = false;
+    this.findMatches = [];
+    this.findTotal = 0;
+    this.findIndex = 0;
+    this.refreshHighlight();
+  }
+
+  /** 重新计算命中位置；jump 为 true 时跳到首个命中 */
+  private doFind(jump: boolean): void {
+    this.findMatches = [];
+    const q = this.findQuery.toLowerCase();
+    if (q.length > 0) {
+      const lower = this.jsonText.toLowerCase();
+      let from = 0;
+      while (from <= lower.length - q.length) {
+        const idx = lower.indexOf(q, from);
+        if (idx < 0) {
+          break;
+        }
+        this.findMatches.push(idx);
+        if (this.findMatches.length >= 5000) {
+          break;
+        }
+        from = idx + q.length;
+      }
+    }
+    this.findTotal = this.findMatches.length;
+    if (jump) {
+      this.findIndex = this.findTotal > 0 ? 1 : 0;
+      this.scrollToMatch();
+    } else if (this.findIndex > this.findTotal) {
+      this.findIndex = this.findTotal;
+    }
+    this.refreshHighlight();
+  }
+
+  /** step: 1 下一个，-1 上一个 */
+  private findStep(step: number): void {
+    if (this.findTotal === 0) {
+      this.doFind(true);
+      return;
+    }
+    let idx = this.findIndex + step;
+    if (idx > this.findTotal) {
+      idx = 1;
+    } else if (idx < 1) {
+      idx = this.findTotal;
+    }
+    this.findIndex = idx;
+    this.refreshHighlight();
+    this.scrollToMatch();
+  }
+
+  /**
+   * 滚动到当前命中：按字符偏移在全文中的比例估算纵向位置。
+   * 高亮视图是等宽字体 + 固定宽度换行，视觉高度与字符数近似成正比。
+   */
+  private scrollToMatch(): void {
+    if (this.findIndex < 1 || this.findIndex > this.findMatches.length) {
+      return;
+    }
+    const total = this.jsonText.length;
+    if (total <= 0 || this.textContentH <= this.textViewH) {
+      return;
+    }
+    const offset = this.findMatches[this.findIndex - 1];
+    let y = (offset / total) * this.textContentH - this.textViewH / 3;
+    const maxY = this.textContentH - this.textViewH;
+    if (y < 0) {
+      y = 0;
+    }
+    if (y > maxY) {
+      y = maxY;
+    }
+    this.textScroller.scrollTo({ xOffset: 0, yOffset: y });
+  }
+
+  /** 按命中位置切分片段，给命中文字加背景（当前命中用强调色） */
+  private decorateSpans(src: HSpan[], t: GraphTheme): HSpan[] {
+    const q = this.findQuery.length;
+    if (!this.findVisible || q === 0 || this.findMatches.length === 0) {
+      return src;
+    }
+    const out: HSpan[] = [];
+    const cur = this.findIndex - 1;
+    let off = 0;
+    let mi = 0;
+    for (let i = 0; i < src.length; i++) {
+      const sp = src[i];
+      const s = off;
+      const e = off + sp.text.length;
+      off = e;
+      let pos = s;
+      while (pos < e) {
+        while (mi < this.findMatches.length && this.findMatches[mi] + q <= pos) {
+          mi++;
+        }
+        if (mi >= this.findMatches.length) {
+          out.push(new HSpan(sp.text.substring(pos - s), sp.color));
+          break;
+        }
+        const ms = this.findMatches[mi];
+        if (ms >= e) {
+          out.push(new HSpan(sp.text.substring(pos - s), sp.color));
+          break;
+        }
+        if (ms > pos) {
+          out.push(new HSpan(sp.text.substring(pos - s, ms - s), sp.color));
+        }
+        const me = Math.min(ms + q, e);
+        const isCur = mi === cur;
+        out.push(new HSpan(sp.text.substring(ms - s, me - s),
+          isCur ? t.matchTextActive : sp.color,
+          isCur ? t.matchBgActive : t.matchBg));
+        pos = me;
+        if (me === ms + q) {
+          mi++;
+        }
+      }
+    }
+    return out;
   }
 
   /** 载入示例前先清空现有数据 */
@@ -391,12 +573,12 @@ struct Index {
     this.edgeCount = 0;
     this.treeItems = [];
     this.selectedPath = '';
-    this.hitCount = 0;
-    this.hitPaths.clear();
+    this.findMatches = [];
+    this.findTotal = 0;
+    this.findIndex = 0;
     this.collapsed.clear();
     this.treeCollapsed.clear();
     this.renderState.selectedId = '';
-    this.renderState.hitPaths = this.hitPaths;
     this.spans = [];
     this.errorMsg = '';
     this.errorLine = 0;
@@ -432,22 +614,7 @@ struct Index {
     treeLayout.layout(this.graph, this.layoutDir);
     this.nodeCount = this.graph.nodes.length;
     this.edgeCount = this.graph.edges.length;
-    this.applyHitPaths();
     this.draw();
-  }
-
-  private applyHitPaths(): void {
-    this.hitPaths.clear();
-    if (this.root !== null && this.hitCount > 0) {
-      const hits = searchJson(this.root, this.expressionInput);
-      for (let i = 0; i < hits.length; i++) {
-        const node = findNodeByPath(this.graph, hits[i].path);
-        if (node !== null) {
-          this.hitPaths.add(node.path);
-        }
-      }
-    }
-    this.renderState.hitPaths = this.hitPaths;
   }
 
   private onTextChanged(value: string): void {
@@ -729,6 +896,10 @@ struct Index {
   }
 
   private async exportImage(format: string): Promise<void> {
+    if (this.graph.nodes.length === 0) {
+      this.toast('没有可导出的图形');
+      return;
+    }
     try {
       this.busy = true;
       const documentPicker = new picker.DocumentViewPicker(getContext(this));
@@ -740,24 +911,55 @@ struct Index {
         this.busy = false;
         return;
       }
-      const pixelMap = await componentSnapshot.get('graphCanvas');
+      const pixelMap = this.renderExportPixelMap(2);
+      const info = pixelMap.getImageInfoSync();
       const packer = image.createImagePacker();
       const packOptions: image.PackingOption = {
         format: format === 'jpeg' ? 'image/jpeg' : 'image/png',
-        quality: 96
+        quality: 100
       };
       const buffer = await packer.packToData(pixelMap, packOptions);
       const file = fs.openSync(uris[0], fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       fs.writeSync(file.fd, buffer);
       fs.closeSync(file);
       packer.release();
+      pixelMap.release();
       this.busy = false;
-      this.toast('图片已导出');
+      this.toast('图片已导出（' + info.size.width + '×' + info.size.height + '）');
     } catch (e) {
       this.busy = false;
       const err = e as BusinessError;
       this.toast('导出失败: ' + err.message);
     }
+  }
+
+  /**
+   * 离屏按 ratio 倍分辨率重绘整张图（不受当前缩放/平移影响）。
+   * 组件快照只有屏幕像素密度，文字和线条会发虚，这里直接按目标像素重绘。
+   */
+  private renderExportPixelMap(ratio: number): image.PixelMap {
+    const bounds = computeBounds(this.graph.nodes);
+    const pad = 48;
+    const baseW = Math.max(1, Math.ceil(bounds.width + pad * 2));
+    const baseH = Math.max(1, Math.ceil(bounds.height + pad * 2));
+    const maxEdge = 4096;
+    let r = ratio;
+    const longest = Math.max(baseW, baseH);
+    if (longest * r > maxEdge) {
+      r = maxEdge / longest;
+    }
+    const pxW = Math.max(1, Math.round(baseW * r));
+    const pxH = Math.max(1, Math.round(baseH * r));
+    const off = new OffscreenCanvas(pxW, pxH);
+    const offCtx: OffscreenCanvasRenderingContext2D = off.getContext('2d', new RenderingContextSettings(true));
+    const state = new RenderState();
+    state.theme = this.theme();
+    state.direction = this.layoutDir;
+    state.scale = r;
+    state.offsetX = pad * r - bounds.minX * r;
+    state.offsetY = pad * r - bounds.minY * r;
+    renderGraph(offCtx, this.graph, state, pxW, pxH);
+    return offCtx.getPixelMap(0, 0, pxW, pxH);
   }
 
   private exportSvg(): void {
@@ -963,22 +1165,6 @@ struct Index {
     this.outputText = parts.join('\n');
   }
 
-  private runSearch(): void {
-    if (this.root === null || this.expressionInput.length === 0) {
-      this.outputText = '请输入关键字';
-      return;
-    }
-    const hits: SearchHit[] = searchJson(this.root, this.expressionInput);
-    this.hitCount = hits.length;
-    this.applyHitPaths();
-    const lines: string[] = [];
-    for (let i = 0; i < Math.min(hits.length, 200); i++) {
-      lines.push(hits[i].path + '  →  ' + hits[i].snippet);
-    }
-    this.outputText = lines.length === 0 ? '(没有匹配结果)' : lines.join('\n');
-    this.draw();
-  }
-
   private applyConvert(): void {
     if (this.outputText.length === 0) {
       return;
@@ -1004,6 +1190,45 @@ struct Index {
       this.modalType = 'about';
       this.sheetTitle = '关于';
       this.sheetVisible = true;
+    } else if (key === 'theme') {
+      this.darkMode = !this.darkMode;
+      this.renderState.theme = this.theme();
+      this.draw();
+      if (this.highlighted) {
+        this.refreshHighlight();
+      }
+      this.persist();
+    } else if (key === 'toggleEditor') {
+      this.showEditor = !this.showEditor;
+    }
+  }
+
+  /** 切换图形 / 树视图 */
+  private setViewMode(mode: string): void {
+    if (this.viewMode === mode) {
+      return;
+    }
+    this.viewMode = mode;
+    if (mode === 'tree') {
+      this.refreshTree();
+    }
+    this.persist();
+  }
+
+  /** 切换编辑 / 高亮 */
+  private setEditMode(highlight: boolean): void {
+    if (this.highlighted === highlight) {
+      return;
+    }
+    this.samplePicker = false;
+    this.highlighted = highlight;
+    if (highlight) {
+      this.refreshHighlight();
+    } else if (this.findVisible) {
+      this.findVisible = false;
+      this.findMatches = [];
+      this.findTotal = 0;
+      this.findIndex = 0;
     }
   }
 
@@ -1055,11 +1280,8 @@ struct Index {
       this.outputText = '';
       this.sheetVisible = true;
     } else if (key === 'search') {
-      this.modalType = 'search';
-      this.sheetTitle = '搜索';
-      this.expressionInput = '';
-      this.outputText = '';
-      this.sheetVisible = true;
+      this.sheetVisible = false;
+      this.openFind();
     } else if (key === 'schema') {
       this.modalType = 'schema';
       this.sheetTitle = 'JSON Schema';
@@ -1093,81 +1315,119 @@ struct Index {
   }
 
   /** ---------- UI ---------- */
+  /**
+   * 注意：@Builder 的值参数不会随状态刷新，所以凡是外观依赖状态的按钮
+   * （菜单、分段控制器、深浅色/全屏切换）都必须写成无参 Builder 或直接内联。
+   */
+  /** 鸿蒙风格顶栏按钮：胶囊、透明底、按下有反馈（仅用于文字不变的按钮） */
   @Builder
   navButton(label: string, key: string) {
     Text(label)
       .fontSize(13)
       .fontColor(this.theme().text)
-      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-      .borderRadius(6)
-      .backgroundColor(this.theme().nodeBgAlt)
-      .margin({ right: 6 })
+      .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+      .borderRadius(16)
+      .stateStyles({
+        normal: { .backgroundColor('#00000000') },
+        pressed: { .backgroundColor(this.theme().isDark ? '#26FFFFFF' : '#14000000') }
+      })
       .onClick(() => this.dispatch(key))
   }
 
+  /** 顶栏分组分隔线 */
   @Builder
-  fileMenu() {
-    Menu() {
-      MenuItem({ content: '打开文件…' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('openFile'))
-      MenuItem({ content: '从 URL 导入…' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('url'))
-      MenuItem({ content: '从剪贴板粘贴' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('paste'))
-      MenuItem({ content: '保存为 JSON 文件' }).contentFontColor(this.theme().text)
-        .onClick(() => this.dispatchSheet('saveJson'))
-      MenuItem({ content: '载入示例数据…' }).contentFontColor(this.theme().text)
-        .onClick(() => this.dispatchSheet('samplePick'))
-      MenuItem({ content: '清空编辑器' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('clear'))
-    }
-    .backgroundColor(this.theme().panelBg)
+  barDivider() {
+    Divider()
+      .vertical(true)
+      .height(18)
+      .color(this.theme().panelBorder)
+      .margin({ left: 8, right: 8 })
   }
 
-  /** “工具”下拉菜单 */
+  /** 顶栏：深浅色切换（文字随状态变化，必须无参） */
   @Builder
-  toolMenu() {
-    Menu() {
-      MenuItem({ content: '格式化（2 空格缩进）' }).contentFontColor(this.theme().text)
-        .onClick(() => this.dispatchSheet('fmt2'))
-      MenuItem({ content: '压缩为单行' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('fmt0'))
-      MenuItem({ content: '递归排序键名' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('sort'))
-      MenuItem({ content: '转义为 JSON 字符串' }).contentFontColor(this.theme().text)
-        .onClick(() => this.dispatchSheet('escape'))
-      MenuItem({ content: '反转义' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('unescape'))
-      MenuItem({ content: '校验 JSON' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('validate'))
-    }
-    .backgroundColor(this.theme().panelBg)
+  themeButton() {
+    Text(this.darkMode ? '浅色' : '深色')
+      .fontSize(13)
+      .fontColor(this.theme().text)
+      .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+      .borderRadius(16)
+      .stateStyles({
+        normal: { .backgroundColor('#00000000') },
+        pressed: { .backgroundColor(this.theme().isDark ? '#26FFFFFF' : '#14000000') }
+      })
+      .onClick(() => this.dispatch('theme'))
   }
 
+  /** 顶栏：全屏图形 / 显示编辑 */
   @Builder
-  queryMenu() {
-    Menu() {
-      MenuItem({ content: 'jq 查询' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('jq'))
-      MenuItem({ content: 'JSONPath 查询' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('path'))
-      MenuItem({ content: '搜索（高亮节点）' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('search'))
-    }
-    .backgroundColor(this.theme().panelBg)
+  editorToggleButton() {
+    Text(this.showEditor ? '全屏图形' : '显示编辑')
+      .fontSize(13)
+      .fontColor(this.theme().text)
+      .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+      .borderRadius(16)
+      .stateStyles({
+        normal: { .backgroundColor('#00000000') },
+        pressed: { .backgroundColor(this.theme().isDark ? '#26FFFFFF' : '#14000000') }
+      })
+      .onClick(() => this.dispatch('toggleEditor'))
   }
 
+  /** 顶栏：图形 / 树视图 分段控制器 */
   @Builder
-  generateMenu() {
-    Menu() {
-      MenuItem({ content: 'JSON Schema' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('schema'))
-      MenuItem({ content: '类型定义（TS / Go / Kotlin / Rust）' }).contentFontColor(this.theme().text)
-        .onClick(() => this.dispatchSheet('types'))
-      MenuItem({ content: '格式转换（YAML / CSV / XML）' }).contentFontColor(this.theme().text)
-        .onClick(() => this.dispatchSheet('convert'))
+  viewSegment() {
+    Row() {
+      Text('图形')
+        .fontSize(12)
+        .fontWeight(this.viewMode === 'graph' ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.viewMode === 'graph' ? this.theme().text : this.theme().dimText)
+        .padding({ left: 13, right: 13, top: 5, bottom: 5 })
+        .borderRadius(13)
+        .backgroundColor(this.viewMode === 'graph' ? this.theme().canvasBg : '#00000000')
+        .shadow(this.viewMode === 'graph' ? { radius: 4, color: '#1A000000', offsetY: 1 } : { radius: 0, color: '#00000000' })
+        .onClick(() => this.setViewMode('graph'))
+      Text('树视图')
+        .fontSize(12)
+        .fontWeight(this.viewMode === 'tree' ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.viewMode === 'tree' ? this.theme().text : this.theme().dimText)
+        .padding({ left: 13, right: 13, top: 5, bottom: 5 })
+        .borderRadius(13)
+        .backgroundColor(this.viewMode === 'tree' ? this.theme().canvasBg : '#00000000')
+        .shadow(this.viewMode === 'tree' ? { radius: 4, color: '#1A000000', offsetY: 1 } : { radius: 0, color: '#00000000' })
+        .onClick(() => this.setViewMode('tree'))
     }
-    .backgroundColor(this.theme().panelBg)
+    .padding(2)
+    .borderRadius(15)
+    .backgroundColor(this.theme().nodeBgAlt)
   }
 
+  /** 编辑区头部：编辑 / 高亮 分段控制器 */
   @Builder
-  exportMenu() {
-    Menu() {
-      MenuItem({ content: '导出 SVG（矢量，整图）' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('svg'))
-      MenuItem({ content: '导出 PNG（当前视图）' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('png'))
-      MenuItem({ content: '导出 JPEG（当前视图）' }).contentFontColor(this.theme().text).onClick(() => this.dispatchSheet('jpeg'))
-      MenuItem({ content: '复制 JSON 文本' }).contentFontColor(this.theme().text)
-        .onClick(() => this.dispatchSheet('copyJson'))
+  modeSegment() {
+    Row() {
+      Text('编辑')
+        .fontSize(12)
+        .fontWeight(!this.highlighted ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(!this.highlighted ? this.theme().text : this.theme().dimText)
+        .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+        .borderRadius(12)
+        .backgroundColor(!this.highlighted ? this.theme().canvasBg : '#00000000')
+        .shadow(!this.highlighted ? { radius: 3, color: '#1A000000', offsetY: 1 } : { radius: 0, color: '#00000000' })
+        .onClick(() => this.setEditMode(false))
+      Text('高亮')
+        .fontSize(12)
+        .fontWeight(this.highlighted ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.highlighted ? this.theme().text : this.theme().dimText)
+        .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+        .borderRadius(12)
+        .backgroundColor(this.highlighted ? this.theme().canvasBg : '#00000000')
+        .shadow(this.highlighted ? { radius: 3, color: '#1A000000', offsetY: 1 } : { radius: 0, color: '#00000000' })
+        .onClick(() => this.setEditMode(true))
     }
-    .backgroundColor(this.theme().panelBg)
+    .padding(2)
+    .borderRadius(14)
+    .backgroundColor(this.theme().nodeBgAlt)
   }
 
   @Builder
@@ -1175,11 +1435,15 @@ struct Index {
     Text('文件 ▾')
       .fontSize(13)
       .fontColor(this.theme().text)
-      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-      .borderRadius(6)
-      .backgroundColor(this.theme().nodeBgAlt)
-      .margin({ right: 6 })
-      .bindMenu(this.fileMenu)
+      .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+      .borderRadius(16)
+      .bindMenu(this.fileMenu, {
+        placement: Placement.BottomLeft,
+        enableArrow: false,
+        borderRadius: 10,
+        outlineWidth: 0,
+        backgroundColor: this.theme().panelBg
+      })
   }
 
   @Builder
@@ -1187,11 +1451,15 @@ struct Index {
     Text('工具 ▾')
       .fontSize(13)
       .fontColor(this.theme().text)
-      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-      .borderRadius(6)
-      .backgroundColor(this.theme().nodeBgAlt)
-      .margin({ right: 6 })
-      .bindMenu(this.toolMenu)
+      .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+      .borderRadius(16)
+      .bindMenu(this.toolMenu, {
+        placement: Placement.BottomLeft,
+        enableArrow: false,
+        borderRadius: 10,
+        outlineWidth: 0,
+        backgroundColor: this.theme().panelBg
+      })
   }
 
   @Builder
@@ -1199,11 +1467,15 @@ struct Index {
     Text('查询 ▾')
       .fontSize(13)
       .fontColor(this.theme().text)
-      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-      .borderRadius(6)
-      .backgroundColor(this.theme().nodeBgAlt)
-      .margin({ right: 6 })
-      .bindMenu(this.queryMenu)
+      .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+      .borderRadius(16)
+      .bindMenu(this.queryMenu, {
+        placement: Placement.BottomLeft,
+        enableArrow: false,
+        borderRadius: 10,
+        outlineWidth: 0,
+        backgroundColor: this.theme().panelBg
+      })
   }
 
   @Builder
@@ -1211,11 +1483,15 @@ struct Index {
     Text('生成 ▾')
       .fontSize(13)
       .fontColor(this.theme().text)
-      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-      .borderRadius(6)
-      .backgroundColor(this.theme().nodeBgAlt)
-      .margin({ right: 6 })
-      .bindMenu(this.generateMenu)
+      .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+      .borderRadius(16)
+      .bindMenu(this.generateMenu, {
+        placement: Placement.BottomLeft,
+        enableArrow: false,
+        borderRadius: 10,
+        outlineWidth: 0,
+        backgroundColor: this.theme().panelBg
+      })
   }
 
   @Builder
@@ -1223,105 +1499,238 @@ struct Index {
     Text('导出 ▾')
       .fontSize(13)
       .fontColor(this.theme().text)
-      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-      .borderRadius(6)
-      .backgroundColor(this.theme().nodeBgAlt)
-      .margin({ right: 6 })
-      .bindMenu(this.exportMenu)
+      .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+      .borderRadius(16)
+      .bindMenu(this.exportMenu, {
+        placement: Placement.BottomLeft,
+        enableArrow: false,
+        borderRadius: 10,
+        outlineWidth: 0,
+        backgroundColor: this.theme().panelBg
+      })
+  }
+
+  /** 下拉菜单中的一项（自绘行，便于控制行高与分组） */
+  @Builder
+  menuItem(label: string, act: string) {
+    Row() {
+      Text(label)
+        .fontSize(14)
+        .fontColor(this.theme().text)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(TextAlign.Start)
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .height(34)
+    .padding({ left: 14, right: 14 })
+    .borderRadius(6)
+    .hoverEffect(HoverEffect.Highlight)
+    .onClick(() => this.dispatchSheet(act))
+  }
+
+  /** 菜单分组分割线 */
+  @Builder
+  menuDivider() {
+    Divider()
+      .strokeWidth(1)
+      .color(this.darkMode ? '#4a4a4e' : '#cdd3db')
+      .margin({ left: 10, right: 10, top: 5, bottom: 5 })
+  }
+
+  @Builder
+  fileMenu() {
+    Column() {
+      this.menuItem('打开文件…', 'openFile')
+      this.menuItem('从 URL 导入…', 'url')
+      this.menuItem('从剪贴板粘贴', 'paste')
+      this.menuDivider()
+      this.menuItem('保存为 JSON 文件', 'saveJson')
+      this.menuDivider()
+      this.menuItem('载入示例数据…', 'samplePick')
+      this.menuItem('清空编辑器', 'clear')
+    }
+    .width(216)
+    .padding({ top: 6, bottom: 6, left: 4, right: 4 })
+    .backgroundColor(this.theme().panelBg)
+    .borderRadius(10)
+    .border({ width: 0.5, color: this.darkMode ? '#454549' : '#d8dee5' })
+  }
+
+  /** “工具”下拉菜单 */
+  @Builder
+  toolMenu() {
+    Column() {
+      this.menuItem('格式化（2 空格缩进）', 'fmt2')
+      this.menuItem('压缩为单行', 'fmt0')
+      this.menuDivider()
+      this.menuItem('递归排序键名', 'sort')
+      this.menuDivider()
+      this.menuItem('转义为 JSON 字符串', 'escape')
+      this.menuItem('反转义', 'unescape')
+      this.menuDivider()
+      this.menuItem('校验 JSON', 'validate')
+    }
+    .width(232)
+    .padding({ top: 6, bottom: 6, left: 4, right: 4 })
+    .backgroundColor(this.theme().panelBg)
+    .borderRadius(10)
+    .border({ width: 0.5, color: this.darkMode ? '#454549' : '#d8dee5' })
+  }
+
+  @Builder
+  queryMenu() {
+    Column() {
+      this.menuItem('jq 查询', 'jq')
+      this.menuItem('JSONPath 查询', 'path')
+      this.menuDivider()
+      this.menuItem('文本查找（Ctrl+F）', 'search')
+    }
+    .width(216)
+    .padding({ top: 6, bottom: 6, left: 4, right: 4 })
+    .backgroundColor(this.theme().panelBg)
+    .borderRadius(10)
+    .border({ width: 0.5, color: this.darkMode ? '#454549' : '#d8dee5' })
+  }
+
+  @Builder
+  generateMenu() {
+    Column() {
+      this.menuItem('JSON Schema', 'schema')
+      this.menuDivider()
+      this.menuItem('类型定义（TS / Go / Kotlin / Rust）', 'types')
+      this.menuDivider()
+      this.menuItem('格式转换（YAML / CSV / XML）', 'convert')
+    }
+    .width(292)
+    .padding({ top: 6, bottom: 6, left: 4, right: 4 })
+    .backgroundColor(this.theme().panelBg)
+    .borderRadius(10)
+    .border({ width: 0.5, color: this.darkMode ? '#454549' : '#d8dee5' })
+  }
+
+  @Builder
+  exportMenu() {
+    Column() {
+      this.menuItem('导出 SVG（矢量，整图）', 'svg')
+      this.menuItem('导出 PNG（整图高清）', 'png')
+      this.menuItem('导出 JPEG（整图高清）', 'jpeg')
+      this.menuDivider()
+      this.menuItem('复制 JSON 文本', 'copyJson')
+    }
+    .width(236)
+    .padding({ top: 6, bottom: 6, left: 4, right: 4 })
+    .backgroundColor(this.theme().panelBg)
+    .borderRadius(10)
+    .border({ width: 0.5, color: this.darkMode ? '#454549' : '#d8dee5' })
   }
 
   @Builder
   topBar() {
     Row() {
       Image($r('app.media.logo'))
-        .width(22)
-        .height(22)
-        .borderRadius(6)
+        .width(26)
+        .height(26)
+        .borderRadius(8)
         .objectFit(ImageFit.Cover)
-        .margin({ right: 6 })
+        .margin({ right: 8 })
       Text('HelloJson')
         .fontSize(16)
         .fontWeight(FontWeight.Bold)
-        .fontColor(this.theme().accent)
-        .margin({ right: 8 })
+        .fontColor(this.theme().text)
+      this.barDivider()
       Scroll() {
         Row() {
           this.fileMenuButton()
           this.navButton('格式化', 'format')
           this.navButton('压缩', 'compact')
+          this.barDivider()
           this.toolMenuButton()
           this.queryMenuButton()
           this.generateMenuButton()
           this.exportMenuButton()
+          this.barDivider()
           this.navButton('折叠', 'collapseAll')
           this.navButton('展开', 'expandAll')
-          Text(this.viewMode === 'graph' ? '树视图' : '图形')
-            .fontSize(13)
-            .fontColor(this.theme().text)
-            .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-            .borderRadius(6)
-            .backgroundColor(this.theme().nodeBgAlt)
-            .margin({ right: 6 })
-            .onClick(() => {
-              this.viewMode = this.viewMode === 'graph' ? 'tree' : 'graph';
-              if (this.viewMode === 'tree') {
-                this.refreshTree();
-              }
-              this.persist();
-            })
-          Text(this.darkMode ? '浅色' : '深色')
-            .fontSize(13)
-            .fontColor(this.theme().text)
-            .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-            .borderRadius(6)
-            .backgroundColor(this.theme().nodeBgAlt)
-            .margin({ right: 6 })
-            .onClick(() => {
-              this.darkMode = !this.darkMode;
-              this.renderState.theme = this.theme();
-              this.draw();
-              if (this.highlighted) {
-                this.refreshHighlight();
-              }
-              this.persist();
-            })
-          Text(this.showEditor ? '全屏图形' : '显示编辑')
-            .fontSize(13)
-            .fontColor(this.theme().text)
-            .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-            .borderRadius(6)
-            .backgroundColor(this.theme().nodeBgAlt)
-            .margin({ right: 6 })
-            .onClick(() => {
-              this.showEditor = !this.showEditor;
-            })
+          this.barDivider()
+          this.viewSegment()
+          this.barDivider()
+          this.themeButton()
+          this.editorToggleButton()
           this.navButton('关于', 'about')
         }
+        .height('100%')
       }
       .scrollable(ScrollDirection.Horizontal)
       .scrollBar(BarState.Off)
       .layoutWeight(1)
+      .align(Alignment.Start)
     }
     .width('100%')
-    .padding({ left: 12, right: 8, top: 6, bottom: 6 })
+    .height(52)
+    .padding({ left: 12, right: 8 })
+    .backgroundColor(this.theme().toolbarBg)
+    .border({ width: { bottom: 0.5 }, color: this.theme().panelBorder })
+  }
+
+  /** 浏览器风格查找栏：输入 → 回车/下一个 */
+  @Builder
+  findBar() {
+    Row() {
+      TextInput({ text: this.findQuery, placeholder: '文本查找' })
+        .layoutWeight(1)
+        .height(32)
+        .fontSize(12)
+        .fontFamily('monospace')
+        .padding({ left: 8, right: 8, top: 0, bottom: 0 })
+        .borderRadius(5)
+        .backgroundColor(this.theme().canvasBg)
+        .fontColor(this.theme().text)
+        .placeholderColor(this.theme().dimText)
+        .placeholderFont({ size: 12 })
+        .caretColor(this.theme().accent)
+        .onChange((v: string) => {
+          this.findQuery = v;
+          this.doFind(true);
+        })
+        .onSubmit(() => {
+          this.findStep(1);
+        })
+      this.findButton('查找', 'find')
+      this.findButton('上一个', 'prev')
+      this.findButton('下一个', 'next')
+      this.findButton('关闭', 'close')
+      Text(this.findTotal === 0 ? (this.findQuery.length > 0 ? '无结果' : '0 / 0') :
+        (this.findIndex + ' / ' + this.findTotal))
+        .fontSize(11)
+        .fontColor(this.findTotal === 0 ? this.theme().errorColor : this.theme().dimText)
+        .margin({ left: 6, right: 4 })
+    }
+    .width('100%')
+    .padding({ left: 8, right: 8, top: 4, bottom: 4 })
     .backgroundColor(this.theme().toolbarBg)
     .border({ width: { bottom: 0.5 }, color: this.theme().panelBorder })
   }
 
   @Builder
-  modeTab(label: string, highlight: boolean) {
+  findButton(label: string, act: string) {
     Text(label)
       .fontSize(11)
-      .fontColor(this.highlighted === highlight ? this.theme().canvasBg : this.theme().dimText)
-      .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-      .borderRadius(4)
-      .backgroundColor(this.highlighted === highlight ? this.theme().accent : this.theme().nodeBgAlt)
+      .fontColor(this.theme().text)
+      .padding({ left: 8, right: 8, top: 5, bottom: 5 })
+      .borderRadius(5)
+      .backgroundColor(this.theme().nodeBgAlt)
       .margin({ left: 6 })
       .onClick(() => {
-        this.samplePicker = false;
-        this.highlighted = highlight;
-        if (highlight) {
-          this.refreshHighlight();
+        if (act === 'find') {
+          this.doFind(true);
+        } else if (act === 'prev') {
+          this.findStep(-1);
+        } else if (act === 'next') {
+          this.findStep(1);
+        } else {
+          this.closeFind();
         }
       })
   }
@@ -1348,11 +1757,14 @@ struct Index {
             .fontColor(this.theme().dimText)
             .margin({ right: 4 })
         }
-        this.modeTab('编辑', false)
-        this.modeTab('高亮', true)
+        this.modeSegment()
       }
       .width('100%')
       .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+
+      if (this.findVisible) {
+        this.findBar()
+      }
 
       if (this.samplePicker) {
         Column() {
@@ -1395,11 +1807,15 @@ struct Index {
         .width('100%')
         .backgroundColor(this.theme().canvasBg)
       } else if (this.highlighted) {
-        Scroll() {
+        Scroll(this.textScroller) {
           Text() {
             ForEach(this.spans, (sp: HSpan, idx: number) => {
-              Span(sp.text).fontColor(sp.color)
-            }, (sp: HSpan, idx: number) => idx.toString())
+              if (sp.bg.length > 0) {
+                Span(sp.text).fontColor(sp.color).textBackgroundStyle({ color: sp.bg, radius: 2 })
+              } else {
+                Span(sp.text).fontColor(sp.color)
+              }
+            }, (sp: HSpan, idx: number) => this.spanSeq.toString() + '_' + idx.toString())
           }
           .fontSize(12)
           .fontFamily('monospace')
@@ -1407,6 +1823,9 @@ struct Index {
           .textAlign(TextAlign.Start)
           .wordBreak(WordBreak.BREAK_ALL)
           .copyOption(CopyOptions.LocalDevice)
+          .onAreaChange((oldValue: Area, newValue: Area) => {
+            this.textContentH = Number(newValue.height);
+          })
         }
         .layoutWeight(1)
         .width('100%')
@@ -1414,8 +1833,13 @@ struct Index {
         .padding({ left: 12, right: 12, top: 6, bottom: 6 })
         .backgroundColor(this.theme().canvasBg)
         .scrollBar(BarState.Auto)
+        .onAreaChange((oldValue: Area, newValue: Area) => {
+          this.textViewH = Number(newValue.height);
+        })
         .onClick(() => {
-          this.highlighted = false;
+          if (!this.findVisible) {
+            this.highlighted = false;
+          }
         })
       } else {
         TextArea({ text: this.jsonText, placeholder: '在此输入 JSON / YAML / CSV / XML' })
@@ -1427,6 +1851,9 @@ struct Index {
           .width('100%')
           .onChange((value: string) => {
             this.onTextChanged(value);
+          })
+          .onKeyEvent((e: KeyEvent) => {
+            this.onGlobalKey(e);
           })
       }
     }
@@ -1588,7 +2015,7 @@ struct Index {
             Text(item.isContainer ? ' ' + item.value : ': ' + item.value)
               .fontSize(12)
               .fontFamily('monospace')
-              .fontColor(this.theme().text)
+              .fontColor(item.isContainer ? this.theme().dimText : rowColor(this.theme(), item.kind))
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
               .layoutWeight(1)
@@ -1735,8 +2162,8 @@ struct Index {
       } else {
         Blank()
       }
-      if (this.hitCount > 0) {
-        Text('匹配 ' + this.hitCount)
+      if (this.findVisible) {
+        Text('查找 ' + this.findIndex + ' / ' + this.findTotal)
           .fontSize(10)
           .fontColor(this.theme().searchHit)
           .padding({ left: 7, right: 7, top: 2, bottom: 2 })
@@ -1991,13 +2418,12 @@ struct Index {
         this.resultArea()
       }
 
-      if (this.modalType === 'jq' || this.modalType === 'path' || this.modalType === 'search') {
+      if (this.modalType === 'jq' || this.modalType === 'path') {
         Column() {
           Row() {
             TextInput({
               text: this.expressionInput,
-              placeholder: this.modalType === 'jq' ? '.foo | .[]' :
-                (this.modalType === 'path' ? '$.foo[*]' : '关键字')
+              placeholder: this.modalType === 'jq' ? '.foo | .[]' : '$.foo[*]'
             })
               .layoutWeight(1)
               .fontSize(13)
@@ -2152,8 +2578,6 @@ struct Index {
       this.runJq();
     } else if (this.modalType === 'path') {
       this.runJsonPath();
-    } else {
-      this.runSearch();
     }
   }
 
@@ -2215,6 +2639,9 @@ struct Index {
         if (this.pendingAutoFit) {
           this.autoFitEditorWidth();
         }
+      })
+      .onKeyEvent((e: KeyEvent) => {
+        this.onGlobalKey(e);
       })
 
       if (this.sheetVisible) {

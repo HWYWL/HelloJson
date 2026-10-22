@@ -1,5 +1,5 @@
-import { GraphData, GraphTheme, NODE_FONT_SIZE, NODE_PADDING_X, NODE_PADDING_Y, ROW_HEIGHT, rowColor } from './GraphModel';
-import { truncateText } from './JValue';
+import { GraphData, GraphTheme, NODE_FONT_SIZE, NODE_PADDING_X, NODE_PADDING_Y, ROW_HEIGHT, rowColor, KEY_VALUE_GAP } from './GraphModel';
+import { estimateTextWidth, truncateText } from './JValue';
 import { Bounds, computeBounds, edgePath } from './EdgeGeometry';
 
 function esc(s: string): string {
@@ -52,9 +52,10 @@ export function buildSvg(graph: GraphData, theme: GraphTheme, direction: string,
         textX = node.x + 9 + 20;
       }
       if (row.hasKey) {
+        const keyText = truncateText(row.key, 60) + ':';
         lines.push(`<text x="${textX}" y="${centerY}" fill="${theme.keyText}" font-size="${NODE_FONT_SIZE}">` +
-          `${esc(truncateText(row.key, 60))}: </text>`);
-        const keyW = (truncateText(row.key, 60).length + 2) * NODE_FONT_SIZE * 0.62;
+          `${esc(keyText)}</text>`);
+        const keyW = estimateTextWidth(keyText, NODE_FONT_SIZE) + KEY_VALUE_GAP;
         lines.push(`<text x="${textX + keyW}" y="${centerY}" fill="${rowColor(theme, row.kind)}" ` +
           `font-size="${NODE_FONT_SIZE}">${esc(truncateText(row.value, 82))}</text>`);
       } else {

@@ -47,10 +47,14 @@ $headers = @{
     "X-GitHub-Api-Version" = "2022-11-28"
 }
 
+# 注意：Windows PowerShell 5.1 下 Get-Content -Raw 返回的字符串会被 ConvertTo-Json
+# 序列化成 {"value": ..., "PSPath": ...} 对象，导致 GitHub 报 422。必须用 ReadAllText。
+$notes = [string][IO.File]::ReadAllText($notesPath, [Text.Encoding]::UTF8)
+
 $body = @{
     tag_name   = $Tag
     name       = $Title
-    body       = (Get-Content $notesPath -Raw -Encoding UTF8)
+    body       = $notes
     draft      = $false
     prerelease = $false
 } | ConvertTo-Json -Depth 4
@@ -60,22 +64,35 @@ try {
     $release = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$Repo/releases" `
         -Headers $headers -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body))
 } catch {
-    $msg = $_.Exception.Message
-    if ($msg -match "422") {
+    $code = $null
+    try { $code = $_.Exception.Response.StatusCode.value__ } catch { }
+    $detail = $_.ErrorDetails.Message
+    if ($code -eq 422 -and $detail -match "already_exists") {
         Write-Host "!! 该 tag 已存在 Release，改为在已有 Release 上补传资产" -ForegroundColor Yellow
         $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$Repo/releases/tags/$Tag" -Headers $headers
     } else {
+        Write-Host "!! 创建失败 (HTTP $code)" -ForegroundColor Red
+        if ($detail) { Write-Host $detail -ForegroundColor DarkGray }
         throw
     }
 }
 Write-Host "    release id: $($release.id)"
 Write-Host "    html url  : $($release.html_url)"
 
-$uploadUrl = ($release.upload_url -replace '\{.*\}', "")
-$uploadUri = "$uploadUrl?name=$assetName&label=$assetName"
+$existing = @()
+try {
+    $existing = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/$($release.id)/assets" -Headers $headers
+} catch { }
 
-Write-Host "==> 上传资产 $assetName" -ForegroundColor Cyan
-$assetInfo = Invoke-RestMethod -Method Post -Uri $uploadUri -Headers $headers `
-    -ContentType "application/octet-stream" -InFile $assetPath
-Write-Host "    asset url : $($assetInfo.browser_download_url)"
+if ($existing -and ($existing | Where-Object { $_.name -eq $assetName })) {
+    Write-Host "==> 资产 $assetName 已存在，跳过上传" -ForegroundColor Yellow
+} else {
+    $uploadUrl = ($release.upload_url -replace '\{.*\}', "")
+    $uploadUri = "$uploadUrl" + "?name=$assetName&label=$assetName"
+
+    Write-Host "==> 上传资产 $assetName" -ForegroundColor Cyan
+    $assetInfo = Invoke-RestMethod -Method Post -Uri $uploadUri -Headers $headers `
+        -ContentType "application/octet-stream" -InFile $assetPath
+    Write-Host "    asset url : $($assetInfo.browser_download_url)"
+}
 Write-Host "完成: $($release.html_url)" -ForegroundColor Green

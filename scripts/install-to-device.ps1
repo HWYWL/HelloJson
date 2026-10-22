@@ -3,8 +3,9 @@
 param(
     [string]$Password = "whfR>;O4K@-CkUMdI=",
     [string]$Device = "5JB0224A09000317",
-    [string]$KeyDir = "F:\OpenHarmony\Key\HelloJson\Release",
-    [string]$Mode = "release"
+    [string]$KeyDir = "F:\OpenHarmony\Key\HelloJson\Dev",
+    [string]$KeyAlias = "hellojson",
+    [string]$Mode = "debug"
 )
 
 $ErrorActionPreference = "Continue"
@@ -62,7 +63,10 @@ if ($null -ne $debugProfile) {
     $stem = [IO.Path]::GetFileNameWithoutExtension($debugProfile.Name)
     $p12 = Get-ChildItem $KeyDir -Filter "*.p12" | Where-Object { $stem -match [regex]::Escape($_.BaseName) } | Select-Object -First 1
     if ($null -eq $p12) { $p12 = Get-ChildItem $KeyDir -Filter "*.p12" | Select-Object -First 1 }
-    $cer = Get-ChildItem $KeyDir -Filter "*.cer" | Where-Object { $_.BaseName -notmatch "rootCA|subCA" } | Select-Object -First 1
+    # 调试 profile 绑定的是开发证书，优先选名字含 Dev 的证书，避免误用 release 证书
+    $cerFiles = Get-ChildItem $KeyDir -Filter "*.cer" | Where-Object { $_.BaseName -notmatch "rootCA|subCA" }
+    $cer = $cerFiles | Where-Object { $_.BaseName -match "Dev" } | Select-Object -First 1
+    if ($null -eq $cer) { $cer = $cerFiles | Select-Object -First 1 }
 
     Write-Host "==> 构建（未签名）" -ForegroundColor Cyan
     & $hvigor assembleHap --no-daemon -p product=default -p buildMode=$Mode | Out-Null
@@ -72,7 +76,7 @@ if ($null -ne $debugProfile) {
     Write-Host "==> 使用 hap-sign-tool 签名" -ForegroundColor Cyan
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     $signed = Join-Path $outDir "HelloJson-debug-signed.hap"
-    & $java -jar $signTool sign-app -mode localSign -keyAlias "HelloJson" -appCertFile $cer.FullName `
+    & $java -jar $signTool sign-app -mode localSign -keyAlias $KeyAlias -appCertFile $cer.FullName `
         -profileFile (Join-Path $KeyDir $debugProfile.Name) -inFile $unsigned `
         -signAlg SHA256withECDSA -keystoreFile $p12.FullName -keystorePwd $Password -keyPwd $Password `
         -outFile $signed -compatibleVersion 24 -signCode 1 | Select-String "success|ERROR" | Out-Host

@@ -1,4 +1,4 @@
-import { GraphData, GraphNode, GraphTheme, NODE_FONT_SIZE, NODE_PADDING_X, NODE_PADDING_Y, ROW_HEIGHT, NodeRow, rowColor } from '../core/GraphModel';
+import { GraphData, GraphNode, GraphTheme, NODE_FONT_SIZE, NODE_PADDING_X, NODE_PADDING_Y, ROW_HEIGHT, NodeRow, rowColor, KEY_VALUE_GAP } from '../core/GraphModel';
 import { JKind, estimateTextWidth, truncateText } from '../core/JValue';
 import { edgePath } from '../core/EdgeGeometry';
 
@@ -9,7 +9,7 @@ export class RenderState {
   selectedId: string = '';
   hitPaths: Set<string> = new Set<string>();
   theme: GraphTheme = new GraphTheme();
-  direction: string = 'RIGHT';
+  direction: string = 'DOWN';
 }
 
 export class HitResult {
@@ -20,7 +20,7 @@ export class HitResult {
   hit: boolean = false;
 }
 
-function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+function roundRect(ctx: CanvasRenderer, x: number, y: number, w: number, h: number, r: number): void {
   const radius = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
   ctx.moveTo(x + radius, y);
@@ -43,7 +43,7 @@ function rowText(row: NodeRow): string {
   return value;
 }
 
-export function renderGraph(ctx: CanvasRenderingContext2D, graph: GraphData, state: RenderState,
+export function renderGraph(ctx: CanvasRenderer, graph: GraphData, state: RenderState,
   viewWidth: number, viewHeight: number): void {
   const theme = state.theme;
   ctx.fillStyle = theme.canvasBg;
@@ -147,10 +147,11 @@ export function renderGraph(ctx: CanvasRenderingContext2D, graph: GraphData, sta
       ctx.textBaseline = 'middle';
       ctx.font = `${NODE_FONT_SIZE}px monospace`;
       if (row.hasKey) {
-        const keyText = row.key + ': ';
+        const keyText = truncateText(row.key, 60) + ':';
         ctx.fillStyle = theme.keyText;
-        ctx.fillText(truncateText(keyText, 60), textX, centerY);
-        const offset = estimateTextWidth(truncateText(keyText, 60), NODE_FONT_SIZE);
+        ctx.fillText(keyText, textX, centerY);
+        // 用实际字形宽度定位 value，避免估算偏差在冒号后留下大段空白
+        const offset = ctx.measureText(keyText).width + KEY_VALUE_GAP;
         ctx.fillStyle = rowColor(theme, row.kind);
         ctx.fillText(truncateText(row.value, 82), textX + offset, centerY);
       } else {

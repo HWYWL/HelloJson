@@ -72,6 +72,12 @@ export class GraphTheme {
   edgeLabelBg: string = '#1e1e1e';
   accent: string = '#e5a00d';
   searchHit: string = '#ffd166';
+  /** 文本查找：普通命中背景 */
+  matchBg: string = '#4d3f00';
+  /** 文本查找：当前命中背景 */
+  matchBgActive: string = '#e5a00d';
+  /** 当前命中的文字颜色 */
+  matchTextActive: string = '#1e1e1e';
   selectionBg: string = '#3a3a3a';
   panelBg: string = '#252526';
   panelBorder: string = '#3c3c3c';
@@ -103,6 +109,9 @@ export function lightTheme(): GraphTheme {
   t.edgeLabelBg = '#ffffff';
   t.accent = '#0969da';
   t.searchHit = '#bf8700';
+  t.matchBg = '#fff1a8';
+  t.matchBgActive = '#ffb02e';
+  t.matchTextActive = '#1a1a1a';
   t.selectionBg = '#eaeef2';
   t.panelBg = '#f6f8fa';
   t.panelBorder = '#d0d7de';
@@ -133,9 +142,12 @@ export function rowColor(theme: GraphTheme, kind: JKind): string {
 }
 
 export const NODE_FONT_SIZE: number = 12;
-export const ROW_HEIGHT: number = 26;
-export const NODE_PADDING_X: number = 12;
-export const NODE_PADDING_Y: number = 5;
+/** 行距收紧，同样画布能容纳更多节点，自适应缩放后图形更大 */
+export const ROW_HEIGHT: number = 20;
+export const NODE_PADDING_X: number = 10;
+/** key 冒号与 value 之间的间距（紧凑，避免冒号后出现大段空白） */
+export const KEY_VALUE_GAP: number = 6;
+export const NODE_PADDING_Y: number = 4;
 export const NODE_MAX_WIDTH: number = 660;
 export const COLLAPSE_BUTTON_WIDTH: number = 20;
 
@@ -152,12 +164,14 @@ export function measureNode(rows: NodeRow[]): number[] {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     let text = '';
+    let gap = 0;
     if (row.hasKey) {
-      text += row.key + ': ';
+      text += row.key + ':';
+      gap = KEY_VALUE_GAP;
     }
     text += row.value;
     const truncated = truncateText(text, 82);
-    let w = estimateTextWidth(truncated, NODE_FONT_SIZE) + NODE_PADDING_X * 2;
+    let w = estimateTextWidth(truncated, NODE_FONT_SIZE) + gap + NODE_PADDING_X * 2;
     if (row.collapsible) {
       w += COLLAPSE_BUTTON_WIDTH;
     }

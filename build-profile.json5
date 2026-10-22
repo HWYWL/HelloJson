@@ -1,10 +1,50 @@
 {
   "app": {
-    "signingConfigs": [],
+    "signingConfigs": [
+      {
+        "name": "release",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "F:/OpenHarmony/Key/HelloJson/Release/HelloJson.cer",
+          "keyAlias": "hellojson",
+          "keyPassword": "00000022E4E67EEFEC676247E08703B8D55D4B3792AF26494E6CB321E50470279646CECA9283649DF60CEA451A4F8EDA4928",
+          "profile": "F:/OpenHarmony/Key/HelloJson/Release/HelloJsonRelease.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "F:/OpenHarmony/Key/HelloJson/Release/HelloJson.p12",
+          "storePassword": "00000022512BEB72B88304BA3442763C5D95098B0E32DA58C79F3377953CC49938FD735C96313AADECEEDC37D021435DA8C1"
+        }
+      },
+      {
+        "name": "debug",
+        "type": "HarmonyOS",
+        "material": {
+          "storeFile": "F:/OpenHarmony/Key/HelloJson/Dev/HelloJson.p12",
+          "storePassword": "00000022AAE6AE99E0304236768E4605AE9B2EDE9BE8BE7A212F8EDC0D97C8281785CD390B9D0BF78915ADA3DF7878142537",
+          "keyAlias": "hellojson",
+          "keyPassword": "00000022C657A23CFA32E267726067334A92D92A5F59379812837583E98E803B751ACD2B54F18483662BF295C3E7016D2E43",
+          "signAlg": "SHA256withECDSA",
+          "profile": "F:/OpenHarmony/Key/HelloJson/Dev/HelloJsonDevDebug.p7b",
+          "certpath": "F:/OpenHarmony/Key/HelloJson/Dev/HelloJsonDev.cer"
+        }
+      }
+    ],
     "products": [
       {
         "name": "default",
-        "signingConfig": "default",
+        "signingConfig": "release",
+        "targetSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "6.1.1(24)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      },
+      {
+        "name": "dev",
+        "signingConfig": "debug",
         "targetSdkVersion": "26.0.0",
         "compatibleSdkVersion": "6.1.1(24)",
         "runtimeOS": "HarmonyOS",
@@ -33,7 +73,8 @@
         {
           "name": "default",
           "applyToProducts": [
-            "default"
+            "default",
+            "dev"
           ]
         }
       ]
