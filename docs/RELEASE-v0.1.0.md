@@ -62,6 +62,25 @@
 - 第 3 位：修 bug / 优化代码
 - `-` 后面：编译日期
 
+## 📦 本次发布的安装包
+
+`v0.1.0-20261022-unsigned.hap`（未签名）
+
+未签名包**不能直接 `hdc install`**，会报 `9568322 signature verification failed`。想跑起来有两种方式：
+
+1. 用 DevEco Studio 打开工程 → `File > Project Structure > Signing Configs` → 勾选 `Automatically generate signature` → 直接 Run，或重新打包
+2. 用自己的证书手动签名后再装：
+   ```bash
+   java -jar hap-sign-tool.jar sign-app -mode localSign -keyAlias <别名> \
+     -appCertFile <证书.cer> -profileFile <profile.p7b> \
+     -inFile v0.1.0-20261022-unsigned.hap \
+     -signAlg SHA256withECDSA -keystoreFile <密钥.p12> -keystorePwd <密码> \
+     -keyPwd <密码> -outFile HelloJson-signed.hap -compatibleVersion 24 -signCode 1
+   hdc install -r HelloJson-signed.hap
+   ```
+
+不提供已签名包，是因为调试证书和 profile 都绑定了具体设备 UDID，公开分发没意义 🙃
+
 ## 💻 运行环境
 
 HarmonyOS 6.1.1+（API 24+）

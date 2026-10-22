@@ -9,7 +9,7 @@ param(
     [string]$Tag = "v0.1.0-20261022",
     [string]$Title = "v0.1.0-20261022 · HelloJson 首发版",
     [string]$NotesFile = "docs/RELEASE-v0.1.0.md",
-    [string]$Asset = "build-output/v0.1.0-20261022.hap",
+    [string]$Asset = "build-output/v0.1.0-20261022-unsigned.hap",
     [switch]$DryRun
 )
 $ErrorActionPreference = "Stop"
