@@ -521,7 +521,488 @@ export class TypeGenerator {
     lines.push(pad + '}');
     lines.push('');
   }
+
+  // ---------- C# ----------
+
+  private csUsed: Set<string> = new Set<string>();
+
+  /** 生成 C# 类：属性 PascalCase，key 与属性名不一致时加 [JsonPropertyName] */
+  csharp(root: JValue, rootName: string): string {
+    this.csUsed = new Set<string>();
+    const lines: string[] = [];
+    if (root.kind !== JKind.Obj) {
+      lines.push('// 根节点不是 JSON 对象，无法生成 C# 类');
+      return lines.join('\n');
+    }
+    if (this.csHasCollection(root)) {
+      lines.push('using System.Collections.Generic;');
+    }
+    if (this.csNeedsRename(root)) {
+      lines.push('using System.Text.Json.Serialization;');
+    }
+    if (lines.length > 0) {
+      lines.push('');
+    }
+    this.csClass(root, this.uniqueCsName(pascalCase(rootName)), lines, 0);
+    return lines.join('\n');
+  }
+
+  private swiftPad(depth: number): string {
+    let pad = '';
+    for (let i = 0; i < depth; i++) {
+      pad += '    ';
+    }
+    return pad;
+  }
+
+  private uniqueCsName(base: string): string {
+    let name = base;
+    let seq = 2;
+    while (this.csUsed.has(name)) {
+      name = base + seq.toString();
+      seq++;
+    }
+    this.csUsed.add(name);
+    return name;
+  }
+
+  private csPropName(key: string): string {
+    const name = pascalCase(key);
+    return name.length === 0 ? 'Value' : name;
+  }
+
+  private csHasCollection(value: JValue): boolean {
+    if (value.kind === JKind.Arr) {
+      return true;
+    }
+    if (value.kind === JKind.Obj) {
+      for (let i = 0; i < value.values.length; i++) {
+        if (this.csHasCollection(value.values[i])) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private csNeedsRename(value: JValue): boolean {
+    if (value.kind === JKind.Obj) {
+      for (let i = 0; i < value.keys.length; i++) {
+        if (this.csPropName(value.keys[i]) !== value.keys[i]) {
+          return true;
+        }
+        if (this.csNeedsRename(value.values[i])) {
+          return true;
+        }
+      }
+    } else if (value.kind === JKind.Arr) {
+      for (let i = 0; i < value.items.length; i++) {
+        if (this.csNeedsRename(value.items[i])) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private csType(value: JValue, keyName: string, nested: JValue[], nestedNames: string[]): string {
+    if (value.kind === JKind.Obj) {
+      const name = this.uniqueCsName(pascalCase(keyName));
+      nested.push(value);
+      nestedNames.push(name);
+      return name;
+    }
+    if (value.kind === JKind.Arr) {
+      if (value.items.length === 0) {
+        return 'List<object>';
+      }
+      return 'List<' + this.csType(value.items[0], singular(keyName), nested, nestedNames) + '>';
+    }
+    if (value.kind === JKind.Str) {
+      return 'string';
+    }
+    if (value.kind === JKind.Num) {
+      return 'double';
+    }
+    if (value.kind === JKind.Bool) {
+      return 'bool';
+    }
+    return 'object';
+  }
+
+  private csClass(value: JValue, name: string, lines: string[], depth: number): void {
+    const pad = this.swiftPad(depth);
+    const inner = pad + '    ';
+    const keys = value.keys;
+    const props: string[] = [];
+    const types: string[] = [];
+    const nested: JValue[] = [];
+    const nestedNames: string[] = [];
+    for (let i = 0; i < keys.length; i++) {
+      props.push(this.csPropName(keys[i]));
+      types.push(this.csType(value.values[i], keys[i], nested, nestedNames));
+    }
+
+    lines.push(pad + 'public class ' + name);
+    lines.push(pad + '{');
+    for (let i = 0; i < props.length; i++) {
+      if (props[i] !== keys[i]) {
+        lines.push(inner + '[JsonPropertyName("' + this.javaEscape(keys[i]) + '")]');
+      }
+      lines.push(inner + 'public ' + types[i] + ' ' + props[i] + ' { get; set; }');
+      lines.push('');
+    }
+    for (let i = 0; i < nested.length; i++) {
+      this.csClass(nested[i], nestedNames[i], lines, depth + 1);
+    }
+    lines.push(pad + '}');
+    lines.push('');
+  }
+
+  // ---------- Swift ----------
+
+  private swiftUsed: Set<string> = new Set<string>();
+
+  /** 生成 Swift struct（Codable），对象字段生成为嵌套 struct */
+  swift(root: JValue, rootName: string): string {
+    this.swiftUsed = new Set<string>();
+    const lines: string[] = [];
+    this.swiftStruct(root, this.uniqueSwiftName(pascalCase(rootName)), lines, 0);
+    return lines.join('\n');
+  }
+
+  private uniqueSwiftName(base: string): string {
+    let name = base;
+    let seq = 2;
+    while (this.swiftUsed.has(name)) {
+      name = base + seq.toString();
+      seq++;
+    }
+    this.swiftUsed.add(name);
+    return name;
+  }
+
+  /** JSON key → Swift 属性名：小写驼峰，保留字用反引号 */
+  private swiftFieldName(key: string): string {
+    const cleaned = key.replace(new RegExp('[^A-Za-z0-9]+', 'g'), ' ').trim();
+    const parts = cleaned.length === 0 ? [] : cleaned.split(' ');
+    let out = '';
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      if (p.length === 0) {
+        continue;
+      }
+      if (out.length === 0) {
+        out += p.charAt(0).toLowerCase() + p.substring(1);
+      } else {
+        out += p.charAt(0).toUpperCase() + p.substring(1);
+      }
+    }
+    if (out.length === 0) {
+      out = 'value';
+    }
+    if (/^[0-9]/.test(out)) {
+      out = 'n' + out;
+    }
+    if (SWIFT_KEYWORDS.has(out)) {
+      return '`' + out + '`';
+    }
+    return out;
+  }
+
+  private swiftType(value: JValue, keyName: string, nested: JValue[], nestedNames: string[]): string {
+    if (value.kind === JKind.Obj) {
+      const name = this.uniqueSwiftName(pascalCase(keyName));
+      nested.push(value);
+      nestedNames.push(name);
+      return name;
+    }
+    if (value.kind === JKind.Arr) {
+      if (value.items.length === 0) {
+        return '[Any]';
+      }
+      return '[' + this.swiftType(value.items[0], singular(keyName), nested, nestedNames) + ']';
+    }
+    if (value.kind === JKind.Str) {
+      return 'String';
+    }
+    if (value.kind === JKind.Num) {
+      return 'Double';
+    }
+    if (value.kind === JKind.Bool) {
+      return 'Bool';
+    }
+    return 'Any';
+  }
+
+  private swiftStruct(value: JValue, name: string, lines: string[], depth: number): void {
+    const pad = this.swiftPad(depth);
+    const inner = pad + '    ';
+    if (value.kind !== JKind.Obj) {
+      lines.push('typealias ' + name + ' = ' + this.swiftType(value, name, [], []) + '?');
+      lines.push('');
+      return;
+    }
+    const keys = value.keys;
+    const props: string[] = [];
+    const types: string[] = [];
+    const nested: JValue[] = [];
+    const nestedNames: string[] = [];
+    for (let i = 0; i < keys.length; i++) {
+      props.push(this.swiftFieldName(keys[i]));
+      types.push(this.swiftType(value.values[i], keys[i], nested, nestedNames));
+    }
+    let needMap = false;
+    for (let i = 0; i < props.length; i++) {
+      if (props[i].replace(new RegExp('`', 'g'), '') !== keys[i]) {
+        needMap = true;
+      }
+    }
+
+    lines.push(pad + 'struct ' + name + ': Codable {');
+    for (let i = 0; i < props.length; i++) {
+      lines.push(inner + 'let ' + props[i] + ': ' + types[i] + '?');
+    }
+    if (needMap) {
+      lines.push('');
+      lines.push(inner + 'enum CodingKeys: String, CodingKey {');
+      for (let i = 0; i < props.length; i++) {
+        if (props[i].replace(new RegExp('`', 'g'), '') !== keys[i]) {
+          lines.push(inner + '    case ' + props[i] + ' = "' + this.javaEscape(keys[i]) + '"');
+        }
+      }
+      lines.push(inner + '}');
+    }
+    for (let i = 0; i < nested.length; i++) {
+      lines.push('');
+      this.swiftStruct(nested[i], nestedNames[i], lines, depth + 1);
+    }
+    lines.push(pad + '}');
+    lines.push('');
+  }
+
+  // ---------- Dart ----------
+
+  /** Dart 不支持嵌套类：所有对象拍平成同级类，靠唯一类名区分 */
+  private dartValues: JValue[] = [];
+  private dartNames: string[] = [];
+  private dartUsed: Set<string> = new Set<string>();
+
+  dart(root: JValue, rootName: string): string {
+    this.dartValues = [];
+    this.dartNames = [];
+    this.dartUsed = new Set<string>();
+    const lines: string[] = [];
+    if (root.kind !== JKind.Obj) {
+      lines.push('/// 根节点不是 JSON 对象，无法生成 Dart 类');
+      return lines.join('\n');
+    }
+    this.dartRegister(root, this.uniqueDartName(pascalCase(rootName)));
+    for (let i = 0; i < this.dartValues.length; i++) {
+      this.dartClass(this.dartValues[i], this.dartNames[i], lines);
+      if (i < this.dartValues.length - 1) {
+        lines.push('');
+      }
+    }
+    return lines.join('\n');
+  }
+
+  private uniqueDartName(base: string): string {
+    let name = base;
+    let seq = 2;
+    while (this.dartUsed.has(name)) {
+      name = base + seq.toString();
+      seq++;
+    }
+    this.dartUsed.add(name);
+    return name;
+  }
+
+  private dartRegistered(value: JValue): string {
+    for (let i = 0; i < this.dartValues.length; i++) {
+      if (this.dartValues[i] === value) {
+        return this.dartNames[i];
+      }
+    }
+    return '';
+  }
+
+  private dartRegister(value: JValue, name: string): void {
+    this.dartValues.push(value);
+    this.dartNames.push(name);
+    for (let i = 0; i < value.keys.length; i++) {
+      this.dartType(value.values[i], value.keys[i]);
+    }
+  }
+
+  /** JSON key → Dart 字段名：小写驼峰，保留字加 Value 后缀 */
+  private dartFieldName(key: string): string {
+    const cleaned = key.replace(new RegExp('[^A-Za-z0-9]+', 'g'), ' ').trim();
+    const parts = cleaned.length === 0 ? [] : cleaned.split(' ');
+    let out = '';
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      if (p.length === 0) {
+        continue;
+      }
+      if (out.length === 0) {
+        out += p.charAt(0).toLowerCase() + p.substring(1);
+      } else {
+        out += p.charAt(0).toUpperCase() + p.substring(1);
+      }
+    }
+    if (out.length === 0) {
+      out = 'value';
+    }
+    if (/^[0-9]/.test(out)) {
+      out = 'n' + out;
+    }
+    if (DART_KEYWORDS.has(out)) {
+      out = out + 'Value';
+    }
+    return out;
+  }
+
+  private dartType(value: JValue, keyName: string): string {
+    if (value.kind === JKind.Obj) {
+      const registered = this.dartRegistered(value);
+      if (registered.length > 0) {
+        return registered;
+      }
+      const name = this.uniqueDartName(pascalCase(keyName));
+      this.dartRegister(value, name);
+      return name;
+    }
+    if (value.kind === JKind.Arr) {
+      if (value.items.length === 0) {
+        return 'List<dynamic>';
+      }
+      return 'List<' + this.dartType(value.items[0], singular(keyName)) + '>';
+    }
+    if (value.kind === JKind.Str) {
+      return 'String';
+    }
+    if (value.kind === JKind.Num) {
+      return 'double';
+    }
+    if (value.kind === JKind.Bool) {
+      return 'bool';
+    }
+    return 'dynamic';
+  }
+
+  /** fromJson 中该字段的取值表达式 */
+  private dartFromExpr(value: JValue, keyText: string): string {
+    const src = 'json[' + keyText + ']';
+    if (value.kind === JKind.Obj) {
+      const name = this.dartRegistered(value);
+      if (name.length === 0) {
+        return src;
+      }
+      return src + ' != null ? ' + name + '.fromJson(' + src + ' as Map<String, dynamic>) : null';
+    }
+    if (value.kind === JKind.Arr) {
+      if (value.items.length === 0) {
+        return src + ' as List?';
+      }
+      const head = value.items[0];
+      if (head.kind === JKind.Obj) {
+        const name = this.dartRegistered(head);
+        if (name.length === 0) {
+          return src + ' as List?';
+        }
+        return '(' + src + ' as List?)?.map((e) => ' + name +
+          '.fromJson(e as Map<String, dynamic>)).toList()';
+      }
+      if (head.kind === JKind.Num) {
+        return '(' + src + ' as List?)?.map((e) => (e as num).toDouble()).toList()';
+      }
+      if (head.kind === JKind.Str) {
+        return '(' + src + ' as List?)?.map((e) => e as String).toList()';
+      }
+      if (head.kind === JKind.Bool) {
+        return '(' + src + ' as List?)?.map((e) => e as bool).toList()';
+      }
+      return src + ' as List?';
+    }
+    if (value.kind === JKind.Num) {
+      return '(' + src + ' as num?)?.toDouble()';
+    }
+    if (value.kind === JKind.Bool) {
+      return src + ' as bool?';
+    }
+    if (value.kind === JKind.Str) {
+      return src + ' as String?';
+    }
+    return src;
+  }
+
+  /** toJson 中该字段的写入语句 */
+  private dartToStmt(value: JValue, keyText: string, field: string): string {
+    if (value.kind === JKind.Obj) {
+      return 'map[' + keyText + '] = ' + field + '?.toJson();';
+    }
+    if (value.kind === JKind.Arr) {
+      if (value.items.length > 0 && value.items[0].kind === JKind.Obj) {
+        return 'map[' + keyText + '] = ' + field + '?.map((e) => e.toJson()).toList();';
+      }
+      return 'map[' + keyText + '] = ' + field + ';';
+    }
+    return 'map[' + keyText + '] = ' + field + ';';
+  }
+
+  private dartClass(value: JValue, name: string, lines: string[]): void {
+    const keys = value.keys;
+    const fields: string[] = [];
+    const types: string[] = [];
+    for (let i = 0; i < keys.length; i++) {
+      fields.push(this.dartFieldName(keys[i]));
+      types.push(this.dartType(value.values[i], keys[i]));
+    }
+    lines.push('class ' + name + ' {');
+    for (let i = 0; i < fields.length; i++) {
+      lines.push('  ' + types[i] + '? ' + fields[i] + ';');
+    }
+    lines.push('');
+    lines.push('  ' + name + '();');
+    lines.push('');
+    lines.push('  ' + name + '.fromJson(Map<String, dynamic> json) {');
+    for (let i = 0; i < fields.length; i++) {
+      lines.push('    ' + fields[i] + ' = ' + this.dartFromExpr(value.values[i], JSON.stringify(keys[i])) + ';');
+    }
+    lines.push('  }');
+    lines.push('');
+    lines.push('  Map<String, dynamic> toJson() {');
+    lines.push('    final map = <String, dynamic>{};');
+    for (let i = 0; i < fields.length; i++) {
+      lines.push('    ' + this.dartToStmt(value.values[i], JSON.stringify(keys[i]), fields[i]));
+    }
+    lines.push('    return map;');
+    lines.push('  }');
+    lines.push('}');
+  }
 }
+
+/** Dart 保留字：字段名撞上时加 Value 后缀 */
+const DART_KEYWORDS: Set<string> = new Set<string>([
+  'abstract', 'as', 'assert', 'async', 'await', 'base', 'break', 'case', 'catch', 'class',
+  'const', 'continue', 'covariant', 'default', 'deferred', 'do', 'dynamic', 'else', 'enum',
+  'export', 'extends', 'extension', 'external', 'factory', 'false', 'final', 'finally', 'for',
+  'function', 'get', 'hide', 'if', 'implements', 'import', 'in', 'interface', 'is', 'late',
+  'library', 'mixin', 'new', 'null', 'on', 'operator', 'part', 'required', 'rethrow', 'return',
+  'sealed', 'set', 'show', 'static', 'super', 'switch', 'sync', 'this', 'throw', 'true', 'try',
+  'typedef', 'var', 'void', 'while', 'with', 'yield'
+]);
+
+/** Swift 保留字：属性名冲突时用反引号包裹 */
+const SWIFT_KEYWORDS: Set<string> = new Set<string>([
+  'associatedtype', 'class', 'deinit', 'enum', 'extension', 'fileprivate', 'func', 'import',
+  'init', 'inout', 'internal', 'let', 'open', 'operator', 'private', 'precedencegroup',
+  'protocol', 'public', 'rethrows', 'static', 'struct', 'subscript', 'typealias', 'var',
+  'break', 'case', 'catch', 'continue', 'default', 'defer', 'do', 'else', 'fallthrough',
+  'for', 'guard', 'if', 'in', 'repeat', 'return', 'throw', 'switch', 'where', 'while',
+  'any', 'as', 'await', 'false', 'is', 'nil', 'self', 'Self', 'super', 'throws', 'true', 'try'
+]);
 
 export const schemaGenerator: SchemaGenerator = new SchemaGenerator();
 export const typeGenerator: TypeGenerator = new TypeGenerator();

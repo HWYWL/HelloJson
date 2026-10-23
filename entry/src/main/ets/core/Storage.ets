@@ -15,6 +15,12 @@ export class AppConfig {
   /** 仅作为旧版本兼容字段，写入当前激活标签的文本 */
   jsonText: string = '';
   activeTabId: string = '';
+  /** 格式化缩进宽度（2 / 4 空格） */
+  indentWidth: number = 2;
+  /** 编辑器字号 */
+  fontSize: number = 12;
+  /** 编辑器自动换行 */
+  wordWrap: boolean = true;
 }
 
 /** 单个标签的持久化记录 */
@@ -50,6 +56,9 @@ export class ConfigStore {
       cfg.viewMode = this.store.getSync('viewMode', 'graph') as string;
       cfg.jsonText = this.store.getSync('jsonText', '') as string;
       cfg.activeTabId = this.store.getSync('activeTabId', '') as string;
+      cfg.indentWidth = this.store.getSync('indentWidth', 2) as number;
+      cfg.fontSize = this.store.getSync('fontSize', 12) as number;
+      cfg.wordWrap = this.store.getSync('wordWrap', true) as boolean;
       // 老配置没有 themeRev（或版本更低），统一回到默认浅色主题
       const rev = this.store.getSync('themeRev', 0) as number;
       if (rev < THEME_REV) {
@@ -82,6 +91,9 @@ export class ConfigStore {
       this.store.putSync('viewMode', cfg.viewMode);
       this.store.putSync('jsonText', cfg.jsonText);
       this.store.putSync('activeTabId', cfg.activeTabId);
+      this.store.putSync('indentWidth', cfg.indentWidth);
+      this.store.putSync('fontSize', cfg.fontSize);
+      this.store.putSync('wordWrap', cfg.wordWrap);
       this.store.flush();
     } catch (e) {
       return;

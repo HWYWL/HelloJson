@@ -1,3 +1,4 @@
+import { unifiedDataChannel, uniformTypeDescriptor } from '@kit.ArkData';
 import { EditorStore } from '../viewmodel/EditorStore';
 import { HSpan, TabInfo } from '../viewmodel/Types';
 
@@ -238,11 +239,11 @@ export struct EditorPanel {
           }
         }, (sp: HSpan, idx: number) => this.store.spanSeq.toString() + '_' + idx.toString())
       }
-      .fontSize(12)
+      .fontSize(this.store.editorFontSize)
       .fontFamily('monospace')
-      .width('100%')
+      .width(this.store.wordWrap ? '100%' : 20000)
       .textAlign(TextAlign.Start)
-      .wordBreak(WordBreak.BREAK_ALL)
+      .wordBreak(this.store.wordWrap ? WordBreak.BREAK_ALL : WordBreak.NORMAL)
       .copyOption(CopyOptions.LocalDevice)
       .onAreaChange((oldValue: Area, newValue: Area) => {
         this.textContentH = Number(newValue.height);
@@ -253,6 +254,7 @@ export struct EditorPanel {
     .align(Alignment.TopStart)
     .padding({ left: 12, right: 12, top: 6, bottom: 6 })
     .backgroundColor(this.store.theme().canvasBg)
+    .scrollable(this.store.wordWrap ? ScrollDirection.Vertical : ScrollDirection.Horizontal)
     .scrollBar(BarState.Auto)
     .onAreaChange((oldValue: Area, newValue: Area) => {
       this.textViewH = Number(newValue.height);
@@ -409,7 +411,7 @@ export struct EditorPanel {
         this.highlightView()
       } else {
         TextArea({ text: this.store.jsonText, placeholder: '在此输入 JSON / YAML / CSV / XML' })
-          .fontSize(12)
+          .fontSize(this.store.editorFontSize)
           .fontFamily('monospace')
           .fontColor(this.store.theme().text)
           .backgroundColor(this.store.theme().canvasBg)
@@ -431,6 +433,21 @@ export struct EditorPanel {
         right: this.store.stackVertical ? 0 : 0.5,
         bottom: this.store.stackVertical ? 0.5 : 0
       }, color: this.store.theme().panelBorder
+    })
+    .allowDrop([uniformTypeDescriptor.UniformDataType.FILE, uniformTypeDescriptor.UniformDataType.PLAIN_TEXT])
+    .onDrop((event: DragEvent) => {
+      const records = event.getData().getRecords();
+      let uri = '';
+      let text = '';
+      for (let i = 0; i < records.length; i++) {
+        const rec = records[i];
+        if (rec instanceof unifiedDataChannel.File) {
+          uri = (rec as unifiedDataChannel.File).uri;
+        } else if (rec instanceof unifiedDataChannel.PlainText) {
+          text = (rec as unifiedDataChannel.PlainText).textContent;
+        }
+      }
+      this.store.importDropped(uri, text);
     })
   }
 }

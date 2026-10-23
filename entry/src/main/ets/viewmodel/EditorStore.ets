@@ -20,7 +20,11 @@ import { computeBounds } from '../core/EdgeGeometry';
 import { jqEngine, JqResult } from '../core/JqEngine';
 import { jsonPathEngine, JPathResult } from '../core/JsonPathEngine';
 import { schemaGenerator, typeGenerator } from '../core/CodeGen';
-import { jsonToYaml, yamlToJson, jsonToCsv, csvToJson, jsonToXml, xmlToJson } from '../core/Convert';
+import {
+  jsonToYaml, yamlToJson, jsonToCsv, csvToJson, jsonToXml, xmlToJson,
+  jsonToToml, tomlToJson, jsonToProperties, propertiesToJson,
+  jsonToQuery, queryToJson, jsonToMarkdown, markdownToJson
+} from '../core/Convert';
 import { buildSvg } from '../core/SvgExport';
 import { DiffLine, DiffResult, diffLines } from '../core/JsonDiff';
 import { SchemaError, SchemaValidator } from '../core/SchemaValidator';
@@ -78,6 +82,12 @@ export class EditorStore {
   stackVertical: boolean = true;
   treeItems: TreeItem[] = [];
   busy: boolean = false;
+  /** 编辑器设置：格式化缩进宽度（2 / 4 空格） */
+  indentWidth: number = 2;
+  /** 编辑器字号 */
+  editorFontSize: number = 12;
+  /** 编辑器自动换行 */
+  wordWrap: boolean = true;
   highlighted: boolean = false;
   spans: HSpan[] = [];
   lineCount: number = 1;
@@ -179,6 +189,9 @@ export class EditorStore {
     this.darkMode = cfg.darkMode;
     this.layoutDir = cfg.direction;
     this.viewMode = cfg.viewMode;
+    this.indentWidth = cfg.indentWidth === 4 ? 4 : 2;
+    this.editorFontSize = Math.max(10, Math.min(20, cfg.fontSize));
+    this.wordWrap = cfg.wordWrap;
 
     const records: TabRecord[] = configStore.loadTabs();
     hilog.info(0x0000, 'HelloJson', 'init tabs=' + records.length + ' cfgActive=' + cfg.activeTabId);
@@ -243,6 +256,9 @@ export class EditorStore {
     cfg.viewMode = this.viewMode;
     cfg.jsonText = this.jsonText;
     cfg.activeTabId = this.activeTabId;
+    cfg.indentWidth = this.indentWidth;
+    cfg.fontSize = this.editorFontSize;
+    cfg.wordWrap = this.wordWrap;
     configStore.save(cfg);
     configStore.saveTabs(records, this.activeTabId);
     this.refreshTabBar();
@@ -633,7 +649,7 @@ export class EditorStore {
     if (maxUnits <= 0) {
       return;
     }
-    const desired = maxUnits * 7.4 + 40;
+    const desired = maxUnits * this.editorFontSize * 0.618 + 40;
     let ratio = desired / this.flexW;
     if (ratio < 0.18) {
       ratio = 0.18;
@@ -863,7 +879,7 @@ export class EditorStore {
           return;
         case KeyCode.KEYCODE_F:
           if (shift) {
-            this.applyFormat(2);
+            this.applyFormat(this.indentWidth);
           } else {
             this.openFind();
           }
@@ -1025,7 +1041,7 @@ export class EditorStore {
     } else if (kind === 'xml') {
       root = xmlToJson(SAMPLE_XML);
     }
-    this.jsonText = root === null ? SAMPLE : stringifyJson(root, 2, false);
+    this.jsonText = root === null ? SAMPLE : stringifyJson(root, this.indentWidth, false);
     this.parseAndRender(true);
     this.highlighted = true;
     this.refreshHighlight();
@@ -1250,7 +1266,7 @@ export class EditorStore {
       return;
     }
     const jp = jsonPathEngine.query(this.root, node.path);
-    const content = jp.values.length > 0 ? stringifyJson(jp.values[0], 2, false) : '';
+    const content = jp.values.length > 0 ? stringifyJson(jp.values[0], this.indentWidth, false) : '';
     this.outputText = content;
     this.sheetTitle = '节点详情';
     this.modalType = 'node';
@@ -1553,17 +1569,41 @@ export class EditorStore {
       if (uris.length === 0) {
         return;
       }
-      const file = fs.openSync(uris[0], fs.OpenMode.READ_ONLY);
+      this.openUri(uris[0]);
+    } catch (e) {
+      this.toast('打开文件失败');
+    }
+  }
+
+  /** 按 uri 读取文本并作为新标签打开（打开文件 / 拖拽导入共用） */
+  private openUri(uri: string): void {
+    try {
+      const file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
       const stat = fs.statSync(file.fd);
       const buffer = new ArrayBuffer(stat.size);
       fs.readSync(file.fd, buffer);
       fs.closeSync(file);
       const content = util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(buffer));
-      this.openDoc(this.fileNameOf(uris[0]), this.normalizeImport(uris[0], content));
+      this.openDoc(this.fileNameOf(uri), this.normalizeImport(uri, content));
       this.autoFitEditorWidth();
       this.sheetVisible = false;
     } catch (e) {
-      this.toast('打开文件失败');
+      this.toast('文件读取失败');
+    }
+  }
+
+  /** 拖拽导入：优先按文件 uri 读取，其次使用拖入的纯文本 */
+  async importDropped(uri: string, text: string): Promise<void> {
+    if (uri.length > 0) {
+      this.openUri(uri);
+      this.toast('已导入 ' + this.fileNameOf(uri));
+      return;
+    }
+    if (text.length > 0) {
+      this.openDoc('拖入文本', this.normalizeImport('dropped.json', text));
+      this.autoFitEditorWidth();
+      this.sheetVisible = false;
+      this.toast('已导入拖拽文本');
     }
   }
 
@@ -1571,13 +1611,25 @@ export class EditorStore {
     const lower = uri.toLowerCase();
     try {
       if (lower.endsWith('.yaml') || lower.endsWith('.yml')) {
-        return stringifyJson(yamlToJson(content), 2, false);
+        return stringifyJson(yamlToJson(content), this.indentWidth, false);
       }
       if (lower.endsWith('.csv')) {
-        return stringifyJson(csvToJson(content), 2, false);
+        return stringifyJson(csvToJson(content), this.indentWidth, false);
       }
       if (lower.endsWith('.xml')) {
-        return stringifyJson(xmlToJson(content), 2, false);
+        return stringifyJson(xmlToJson(content), this.indentWidth, false);
+      }
+      if (lower.endsWith('.toml')) {
+        return stringifyJson(tomlToJson(content), this.indentWidth, false);
+      }
+      if (lower.endsWith('.properties') || lower.endsWith('.props')) {
+        return stringifyJson(propertiesToJson(content), this.indentWidth, false);
+      }
+      if (lower.endsWith('.md') || lower.endsWith('.markdown')) {
+        return stringifyJson(markdownToJson(content), this.indentWidth, false);
+      }
+      if (lower.endsWith('.query') || lower.endsWith('.params')) {
+        return stringifyJson(queryToJson(content), this.indentWidth, false);
       }
     } catch (e) {
       return content;
@@ -1799,7 +1851,7 @@ export class EditorStore {
     }
     const sorted = sortKeysDeep(this.root);
     this.recordHistory(this.jsonText, false);
-    this.jsonText = stringifyJson(sorted, 2, false);
+    this.jsonText = stringifyJson(sorted, this.indentWidth, false);
     this.parseAndRender(false);
     this.showHighlighted();
     this.autoFitEditorWidth();
@@ -1840,6 +1892,15 @@ export class EditorStore {
     if (language === 'java') {
       return typeGenerator.java(this.root, 'Root', this.javaLombok);
     }
+    if (language === 'csharp') {
+      return typeGenerator.csharp(this.root, 'Root');
+    }
+    if (language === 'swift') {
+      return typeGenerator.swift(this.root, 'Root');
+    }
+    if (language === 'dart') {
+      return typeGenerator.dart(this.root, 'Root');
+    }
     return typeGenerator.ts(this.root, 'Root');
   }
 
@@ -1856,6 +1917,18 @@ export class EditorStore {
     if (format === 'xml') {
       return jsonToXml(this.root);
     }
+    if (format === 'toml') {
+      return jsonToToml(this.root);
+    }
+    if (format === 'properties') {
+      return jsonToProperties(this.root);
+    }
+    if (format === 'query') {
+      return jsonToQuery(this.root);
+    }
+    if (format === 'markdown') {
+      return jsonToMarkdown(this.root);
+    }
     return '';
   }
 
@@ -1871,7 +1944,7 @@ export class EditorStore {
     }
     const parts: string[] = [];
     for (let i = 0; i < res.values.length; i++) {
-      parts.push(stringifyJson(res.values[i], 2, false));
+      parts.push(stringifyJson(res.values[i], this.indentWidth, false));
     }
     this.outputText = parts.length === 0 ? '(空结果)' : parts.join('\n');
   }
@@ -1892,7 +1965,7 @@ export class EditorStore {
     }
     const parts: string[] = [];
     for (let i = 0; i < res.values.length; i++) {
-      parts.push(stringifyJson(res.values[i], 2, false));
+      parts.push(stringifyJson(res.values[i], this.indentWidth, false));
     }
     this.outputText = parts.join('\n');
   }
@@ -1913,7 +1986,7 @@ export class EditorStore {
 
   dispatch(key: string): void {
     if (key === 'format') {
-      this.applyFormat(2);
+      this.applyFormat(this.indentWidth);
     } else if (key === 'compact') {
       this.applyFormat(0);
     } else if (key === 'collapseAll') {
@@ -1934,6 +2007,36 @@ export class EditorStore {
     } else if (key === 'toggleEditor') {
       this.showEditor = !this.showEditor;
     }
+  }
+
+  /** 格式化缩进宽度（仅支持 2 / 4 空格） */
+  setIndentWidth(width: number): void {
+    const next = width === 4 ? 4 : 2;
+    if (next === this.indentWidth) {
+      return;
+    }
+    this.indentWidth = next;
+    this.persist();
+    this.toast('缩进已切换为 ' + next.toString() + ' 空格');
+  }
+
+  /** 调整编辑器字号（10 - 20） */
+  adjustFontSize(delta: number): void {
+    const next = Math.max(10, Math.min(20, this.editorFontSize + delta));
+    if (next === this.editorFontSize) {
+      return;
+    }
+    this.editorFontSize = next;
+    this.autoFitEditorWidth();
+    this.persist();
+    this.toast('字号 ' + next.toString());
+  }
+
+  /** 切换编辑器自动换行 */
+  toggleWordWrap(): void {
+    this.wordWrap = !this.wordWrap;
+    this.persist();
+    this.toast(this.wordWrap ? '已开启自动换行' : '已关闭自动换行');
   }
 
   /** 切换图形 / 树视图 */
@@ -1991,9 +2094,19 @@ export class EditorStore {
       this.sheetTitle = '从 URL 导入';
       this.sheetVisible = true;
     } else if (key === 'fmt2') {
-      this.applyFormat(2);
+      this.applyFormat(this.indentWidth);
     } else if (key === 'fmt0') {
       this.applyFormat(0);
+    } else if (key === 'indent2') {
+      this.setIndentWidth(2);
+    } else if (key === 'indent4') {
+      this.setIndentWidth(4);
+    } else if (key === 'fontInc') {
+      this.adjustFontSize(1);
+    } else if (key === 'fontDec') {
+      this.adjustFontSize(-1);
+    } else if (key === 'wrap') {
+      this.toggleWordWrap();
     } else if (key === 'sort') {
       this.doSortKeys();
     } else if (key === 'escape') {

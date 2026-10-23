@@ -69,7 +69,12 @@ if ($null -ne $debugProfile) {
     if ($null -eq $cer) { $cer = $cerFiles | Select-Object -First 1 }
 
     Write-Host "==> 构建（未签名）" -ForegroundColor Cyan
-    & $hvigor assembleHap --no-daemon -p product=default -p buildMode=$Mode | Out-Null
+    $buildLog = & $hvigor assembleHap --no-daemon -p product=default -p buildMode=$Mode 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $buildLog | Select-String "ERROR" | Select-Object -Last 12 | Out-Host
+        Write-Host "!! 构建失败" -ForegroundColor Red
+        exit 1
+    }
     $unsigned = Join-Path $root "entry\build\default\outputs\default\entry-default-unsigned.hap"
     if (-not (Test-Path $unsigned)) { Write-Host "!! 构建失败" -ForegroundColor Red; exit 1 }
 
@@ -83,7 +88,12 @@ if ($null -ne $debugProfile) {
     $hdcHap = $signed
 } else {
     Write-Host "==> 未发现 bundle=com.yi.json 的调试 profile，尝试使用 hvigor 已配置的签名" -ForegroundColor Yellow
-    & $hvigor assembleHap --no-daemon -p product=default -p buildMode=$Mode | Out-Null
+    $buildLog = & $hvigor assembleHap --no-daemon -p product=default -p buildMode=$Mode 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $buildLog | Select-String "ERROR" | Select-Object -Last 12 | Out-Host
+        Write-Host "!! 构建失败" -ForegroundColor Red
+        exit 1
+    }
     $candidate = Get-ChildItem "entry\build\default\outputs\default" -Filter "*-signed.hap" -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($null -ne $candidate) {

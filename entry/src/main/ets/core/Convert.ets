@@ -1,4 +1,6 @@
 import { JKind, JValue } from './JValue';
+import { jsonParser } from './JsonParser';
+import { stringifyJson } from './JsonWriter';
 
 /** ---------- JSON -> YAML ---------- */
 function yamlScalar(v: JValue): string {
@@ -582,4 +584,667 @@ export function searchJson(root: JValue, query: string): SearchHit[] {
   };
   walk(root, '$');
   return hits;
+}
+
+/** ---------- 扁平键值（properties / URL 查询串共用） ---------- */
+function flattenPairs(v: JValue, prefix: string, keys: string[], values: JValue[]): void {
+  if (v.kind === JKind.Obj) {
+    for (let i = 0; i < v.keys.length; i++) {
+      const key = prefix.length === 0 ? v.keys[i] : prefix + '.' + v.keys[i];
+      flattenPairs(v.values[i], key, keys, values);
+    }
+    return;
+  }
+  if (v.kind === JKind.Arr) {
+    for (let i = 0; i < v.items.length; i++) {
+      const key = prefix.length === 0 ? i.toString() : prefix + '.' + i.toString();
+      flattenPairs(v.items[i], key, keys, values);
+    }
+    return;
+  }
+  if (prefix.length === 0) {
+    return;
+  }
+  keys.push(prefix);
+  values.push(v);
+}
+
+function scalarText(v: JValue): string {
+  if (v.kind === JKind.Null) {
+    return '';
+  }
+  return v.text;
+}
+
+/** 字符串标量尽量还原成数字 / 布尔，其余保持字符串 */
+function parseScalar(raw: string): JValue {
+  const t = raw.trim();
+  if (t === 'true') {
+    return JValue.ofBool(true);
+  }
+  if (t === 'false') {
+    return JValue.ofBool(false);
+  }
+  if (t === 'null') {
+    return JValue.ofNull();
+  }
+  if (t.length === 0) {
+    return JValue.ofStr('');
+  }
+  if (/^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$/.test(t)) {
+    return JValue.ofNum(Number(t), t);
+  }
+  return JValue.ofStr(t);
+}
+
+/** 按 a.b.0.c 形式的路径写入，数字段在数组上按下标处理 */
+function setPathValue(root: JValue, path: string, value: JValue): void {
+  const parts = path.split('.');
+  let cur: JValue = root;
+  for (let i = 0; i < parts.length; i++) {
+    const key = parts[i];
+    const last = i === parts.length - 1;
+    const isIndex = /^[0-9]+$/.test(key);
+    if (last) {
+      if (isIndex && cur.kind === JKind.Arr) {
+        const idx = Number(key);
+        while (cur.items.length <= idx) {
+          cur.items.push(JValue.ofNull());
+        }
+        cur.items[idx] = value;
+      } else if (cur.kind === JKind.Obj) {
+        cur.set(key, value);
+      }
+      return;
+    }
+    const nextIsIndex = /^[0-9]+$/.test(parts[i + 1]);
+    if (isIndex && cur.kind === JKind.Arr) {
+      const idx = Number(key);
+      while (cur.items.length <= idx) {
+        cur.items.push(nextIsIndex ? JValue.ofArr() : JValue.ofObj());
+      }
+      if (cur.items[idx].kind !== JKind.Arr && cur.items[idx].kind !== JKind.Obj) {
+        cur.items[idx] = nextIsIndex ? JValue.ofArr() : JValue.ofObj();
+      }
+      cur = cur.items[idx];
+      continue;
+    }
+    if (cur.kind !== JKind.Obj) {
+      return;
+    }
+    const exist = cur.get(key);
+    if (exist === null || (exist.kind !== JKind.Obj && exist.kind !== JKind.Arr)) {
+      const created = nextIsIndex ? JValue.ofArr() : JValue.ofObj();
+      cur.set(key, created);
+      cur = created;
+    } else {
+      cur = exist;
+    }
+  }
+}
+
+/** ---------- Properties ---------- */
+function propEscapeKey(key: string): string {
+  let out = '';
+  for (let i = 0; i < key.length; i++) {
+    const ch = key.charAt(i);
+    if (ch === '\\' || ch === '=' || ch === ':' || ch === ' ') {
+      out += '\\' + ch;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function propEscapeValue(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (ch === '\\') {
+      out += '\\\\';
+    } else if (ch === '\n') {
+      out += '\\n';
+    } else if (ch === '\r') {
+      out += '\\r';
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function propUnescape(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (ch === '\\' && i + 1 < text.length) {
+      const nx = text.charAt(i + 1);
+      i++;
+      if (nx === 'n') {
+        out += '\n';
+      } else if (nx === 'r') {
+        out += '\r';
+      } else if (nx === 't') {
+        out += '\t';
+      } else {
+        out += nx;
+      }
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+export function jsonToProperties(root: JValue): string {
+  const keys: string[] = [];
+  const values: JValue[] = [];
+  flattenPairs(root, '', keys, values);
+  const lines: string[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    lines.push(propEscapeKey(keys[i]) + '=' + propEscapeValue(scalarText(values[i])));
+  }
+  return lines.join('\n');
+}
+
+export function propertiesToJson(text: string): JValue {
+  const root = JValue.ofObj();
+  const lines = text.split(new RegExp('\r?\n'));
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.length === 0 || line.startsWith('#') || line.startsWith('!')) {
+      continue;
+    }
+    let sep = -1;
+    for (let j = 0; j < line.length; j++) {
+      const ch = line.charAt(j);
+      if (ch === '=' || ch === ':') {
+        sep = j;
+        break;
+      }
+    }
+    const rawKey = sep >= 0 ? line.substring(0, sep) : line;
+    const rawVal = sep >= 0 ? line.substring(sep + 1) : '';
+    setPathValue(root, propUnescape(rawKey.trim()), parseScalar(propUnescape(rawVal.trim())));
+  }
+  return root;
+}
+
+/** ---------- URL 查询串 ---------- */
+function decodeComponent(text: string): string {
+  try {
+    return decodeURIComponent(text.replace(new RegExp('\\+', 'g'), ' '));
+  } catch (e) {
+    return text;
+  }
+}
+
+export function jsonToQuery(root: JValue): string {
+  const keys: string[] = [];
+  const values: JValue[] = [];
+  flattenPairs(root, '', keys, values);
+  const parts: string[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    parts.push(encodeURIComponent(keys[i]) + '=' + encodeURIComponent(scalarText(values[i])));
+  }
+  return parts.join('&');
+}
+
+export function queryToJson(text: string): JValue {
+  const root = JValue.ofObj();
+  let q = text.trim();
+  const qm = q.indexOf('?');
+  if (qm >= 0) {
+    q = q.substring(qm + 1);
+  }
+  const hash = q.indexOf('#');
+  if (hash >= 0) {
+    q = q.substring(0, hash);
+  }
+  if (q.length === 0) {
+    return root;
+  }
+  const parts = q.split('&');
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (part.length === 0) {
+      continue;
+    }
+    const eq = part.indexOf('=');
+    const rawKey = eq >= 0 ? part.substring(0, eq) : part;
+    const rawVal = eq >= 0 ? part.substring(eq + 1) : '';
+    setPathValue(root, decodeComponent(rawKey), parseScalar(decodeComponent(rawVal)));
+  }
+  return root;
+}
+
+/** ---------- TOML ---------- */
+function tomlKeyPart(key: string): string {
+  if (/^[A-Za-z0-9_-]+$/.test(key)) {
+    return key;
+  }
+  return JSON.stringify(key);
+}
+
+function tomlInline(v: JValue): string {
+  if (v.kind === JKind.Str) {
+    return JSON.stringify(v.text);
+  }
+  if (v.kind === JKind.Num) {
+    return v.raw.length > 0 ? v.raw : String(v.numVal);
+  }
+  if (v.kind === JKind.Bool) {
+    return v.boolVal ? 'true' : 'false';
+  }
+  if (v.kind === JKind.Null) {
+    return '""';
+  }
+  const parts: string[] = [];
+  if (v.kind === JKind.Arr) {
+    for (let i = 0; i < v.items.length; i++) {
+      parts.push(tomlInline(v.items[i]));
+    }
+    return '[' + parts.join(', ') + ']';
+  }
+  for (let i = 0; i < v.keys.length; i++) {
+    parts.push(tomlKeyPart(v.keys[i]) + ' = ' + tomlInline(v.values[i]));
+  }
+  return '{ ' + parts.join(', ') + ' }';
+}
+
+function isTableArray(v: JValue): boolean {
+  return v.kind === JKind.Arr && v.items.length > 0 && v.items[0].kind === JKind.Obj;
+}
+
+function tomlTable(obj: JValue, path: string, lines: string[]): void {
+  for (let i = 0; i < obj.keys.length; i++) {
+    const v = obj.values[i];
+    if (v.kind === JKind.Obj || isTableArray(v)) {
+      continue;
+    }
+    lines.push(tomlKeyPart(obj.keys[i]) + ' = ' + tomlInline(v));
+  }
+  for (let i = 0; i < obj.keys.length; i++) {
+    const v = obj.values[i];
+    const full = path.length === 0 ? tomlKeyPart(obj.keys[i]) : path + '.' + tomlKeyPart(obj.keys[i]);
+    if (v.kind === JKind.Obj) {
+      lines.push('');
+      lines.push('[' + full + ']');
+      tomlTable(v, full, lines);
+    } else if (isTableArray(v)) {
+      for (let j = 0; j < v.items.length; j++) {
+        lines.push('');
+        lines.push('[[' + full + ']]');
+        tomlTable(v.items[j], full, lines);
+      }
+    }
+  }
+}
+
+export function jsonToToml(root: JValue): string {
+  if (root.kind !== JKind.Obj) {
+    return 'value = ' + tomlInline(root);
+  }
+  const lines: string[] = [];
+  tomlTable(root, '', lines);
+  while (lines.length > 0 && lines[0].length === 0) {
+    lines.splice(0, 1);
+  }
+  return lines.join('\n');
+}
+
+function stripTomlComment(line: string): string {
+  let inStr = false;
+  let quote = '';
+  for (let i = 0; i < line.length; i++) {
+    const ch = line.charAt(i);
+    if (inStr) {
+      if (ch === quote && line.charAt(i - 1) !== '\\') {
+        inStr = false;
+      }
+    } else if (ch === '"' || ch === '\'') {
+      inStr = true;
+      quote = ch;
+    } else if (ch === '#') {
+      return line.substring(0, i);
+    }
+  }
+  return line;
+}
+
+function splitTopLevel(text: string, sep: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let inStr = false;
+  let quote = '';
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (inStr) {
+      if (ch === quote && text.charAt(i - 1) !== '\\') {
+        inStr = false;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === '\'') {
+      inStr = true;
+      quote = ch;
+      continue;
+    }
+    if (ch === '[' || ch === '{') {
+      depth++;
+    } else if (ch === ']' || ch === '}') {
+      depth--;
+    } else if (ch === sep && depth === 0) {
+      out.push(text.substring(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(text.substring(start));
+  return out;
+}
+
+function unescapeTomlString(s: string): string {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s.charAt(i);
+    if (ch !== '\\' || i + 1 >= s.length) {
+      out += ch;
+      continue;
+    }
+    const nx = s.charAt(i + 1);
+    i++;
+    if (nx === 'n') {
+      out += '\n';
+    } else if (nx === 't') {
+      out += '\t';
+    } else if (nx === 'r') {
+      out += '\r';
+    } else if (nx === '"') {
+      out += '"';
+    } else if (nx === '\\') {
+      out += '\\';
+    } else {
+      out += nx;
+    }
+  }
+  return out;
+}
+
+function tomlParseValue(raw: string): JValue {
+  const t = raw.trim();
+  if (t.length === 0) {
+    return JValue.ofStr('');
+  }
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    return JValue.ofStr(unescapeTomlString(t.substring(1, t.length - 1)));
+  }
+  if (t.length >= 2 && t.startsWith('\'') && t.endsWith('\'')) {
+    return JValue.ofStr(t.substring(1, t.length - 1));
+  }
+  if (t === 'true') {
+    return JValue.ofBool(true);
+  }
+  if (t === 'false') {
+    return JValue.ofBool(false);
+  }
+  if (t.startsWith('[') && t.endsWith(']')) {
+    const arr = JValue.ofArr();
+    const inner = t.substring(1, t.length - 1).trim();
+    if (inner.length > 0) {
+      const parts = splitTopLevel(inner, ',');
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i].trim().length > 0) {
+          arr.items.push(tomlParseValue(parts[i]));
+        }
+      }
+    }
+    return arr;
+  }
+  if (t.startsWith('{') && t.endsWith('}')) {
+    const obj = JValue.ofObj();
+    const inner = t.substring(1, t.length - 1).trim();
+    if (inner.length > 0) {
+      const parts = splitTopLevel(inner, ',');
+      for (let i = 0; i < parts.length; i++) {
+        const eq = findTopLevelEq(parts[i]);
+        if (eq < 0) {
+          continue;
+        }
+        const key = tomlPath(parts[i].substring(0, eq));
+        obj.set(key.length > 0 ? key[0] : '', tomlParseValue(parts[i].substring(eq + 1)));
+      }
+    }
+    return obj;
+  }
+  return parseScalar(t);
+}
+
+function tomlPath(text: string): string[] {
+  const out: string[] = [];
+  const parts = splitTopLevel(text, '.');
+  for (let i = 0; i < parts.length; i++) {
+    let p = parts[i].trim();
+    if (p.length >= 2 && p.startsWith('"') && p.endsWith('"')) {
+      p = unescapeTomlString(p.substring(1, p.length - 1));
+    } else if (p.length >= 2 && p.startsWith('\'') && p.endsWith('\'')) {
+      p = p.substring(1, p.length - 1);
+    }
+    if (p.length > 0) {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+function findTopLevelEq(line: string): number {
+  let inStr = false;
+  let quote = '';
+  for (let i = 0; i < line.length; i++) {
+    const ch = line.charAt(i);
+    if (inStr) {
+      if (ch === quote && line.charAt(i - 1) !== '\\') {
+        inStr = false;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === '\'') {
+      inStr = true;
+      quote = ch;
+      continue;
+    }
+    if (ch === '=') {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function tomlTableAt(root: JValue, parts: string[], arrayTable: boolean): JValue {
+  let cur: JValue = root;
+  for (let i = 0; i < parts.length; i++) {
+    const key = parts[i];
+    const last = i === parts.length - 1;
+    if (last && arrayTable) {
+      let arr = cur.get(key);
+      if (arr === null || arr.kind !== JKind.Arr) {
+        arr = JValue.ofArr();
+        cur.set(key, arr);
+      }
+      const item = JValue.ofObj();
+      arr.items.push(item);
+      return item;
+    }
+    if (last) {
+      const exist = cur.get(key);
+      if (exist !== null && exist.kind === JKind.Obj) {
+        return exist;
+      }
+      const created = JValue.ofObj();
+      cur.set(key, created);
+      return created;
+    }
+    const next = cur.get(key);
+    if (next === null || next.kind !== JKind.Obj) {
+      const created = JValue.ofObj();
+      cur.set(key, created);
+      cur = created;
+    } else {
+      cur = next;
+    }
+  }
+  return cur;
+}
+
+export function tomlToJson(text: string): JValue {
+  const root = JValue.ofObj();
+  let cur: JValue = root;
+  const lines = text.split(new RegExp('\r?\n'));
+  for (let i = 0; i < lines.length; i++) {
+    const line = stripTomlComment(lines[i]).trim();
+    if (line.length === 0) {
+      continue;
+    }
+    if (line.startsWith('[[') && line.endsWith(']]')) {
+      cur = tomlTableAt(root, tomlPath(line.substring(2, line.length - 2)), true);
+      continue;
+    }
+    if (line.startsWith('[') && line.endsWith(']')) {
+      cur = tomlTableAt(root, tomlPath(line.substring(1, line.length - 1)), false);
+      continue;
+    }
+    const eq = findTopLevelEq(line);
+    if (eq < 0) {
+      continue;
+    }
+    const parts = tomlPath(line.substring(0, eq));
+    const value = tomlParseValue(line.substring(eq + 1));
+    if (parts.length === 1) {
+      cur.set(parts[0], value);
+    } else if (parts.length > 1) {
+      setPathValue(cur, parts.join('.'), value);
+    }
+  }
+  return root;
+}
+
+/** ---------- Markdown 表格 ---------- */
+function mdCell(v: JValue): string {
+  let text = '';
+  if (v.isContainer()) {
+    text = stringifyJson(v, 0, false);
+  } else if (v.kind !== JKind.Null) {
+    text = v.text;
+  }
+  return text.split('|').join('\\|').split('\n').join('<br>');
+}
+
+export function jsonToMarkdown(root: JValue): string {
+  if (root.kind === JKind.Arr && root.items.length > 0 && root.items[0].kind === JKind.Obj) {
+    const headers: string[] = [];
+    for (let i = 0; i < root.items.length; i++) {
+      const item = root.items[i];
+      if (item.kind !== JKind.Obj) {
+        continue;
+      }
+      for (let j = 0; j < item.keys.length; j++) {
+        if (headers.indexOf(item.keys[j]) < 0) {
+          headers.push(item.keys[j]);
+        }
+      }
+    }
+    if (headers.length === 0) {
+      return '';
+    }
+    const lines: string[] = [];
+    lines.push('| ' + headers.join(' | ') + ' |');
+    const seps: string[] = [];
+    for (let i = 0; i < headers.length; i++) {
+      seps.push('---');
+    }
+    lines.push('| ' + seps.join(' | ') + ' |');
+    for (let i = 0; i < root.items.length; i++) {
+      const row = root.items[i];
+      const cells: string[] = [];
+      for (let j = 0; j < headers.length; j++) {
+        const cell = row.kind === JKind.Obj ? row.get(headers[j]) : null;
+        cells.push(cell === null ? '' : mdCell(cell));
+      }
+      lines.push('| ' + cells.join(' | ') + ' |');
+    }
+    return lines.join('\n');
+  }
+  return '```json\n' + stringifyJson(root, 2, false) + '\n```';
+}
+
+function mdCells(row: string): string[] {
+  let body = row.trim();
+  if (body.startsWith('|')) {
+    body = body.substring(1);
+  }
+  if (body.endsWith('|')) {
+    body = body.substring(0, body.length - 1);
+  }
+  const parts = body.split('|');
+  const out: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    out.push(parts[i].trim().split('\\|').join('|').split('<br>').join('\n'));
+  }
+  return out;
+}
+
+function isMdSeparator(row: string): boolean {
+  const cells = mdCells(row);
+  if (cells.length === 0) {
+    return false;
+  }
+  for (let i = 0; i < cells.length; i++) {
+    if (!/^:?-{3,}:?$/.test(cells[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function markdownToJson(text: string): JValue {
+  const fence = text.indexOf('```');
+  if (fence >= 0) {
+    const start = text.indexOf('\n', fence);
+    if (start >= 0) {
+      const end = text.indexOf('```', start);
+      if (end > start) {
+        const parsed = jsonParser.parse(text.substring(start + 1, end));
+        if (parsed.ok && parsed.root !== null) {
+          return parsed.root;
+        }
+      }
+    }
+  }
+  const lines = text.split(new RegExp('\r?\n'));
+  const rows: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.startsWith('|') && line.endsWith('|')) {
+      rows.push(line);
+    }
+  }
+  if (rows.length < 2) {
+    return JValue.ofArr();
+  }
+  const headers = mdCells(rows[0]);
+  const arr = JValue.ofArr();
+  let startRow = 1;
+  if (isMdSeparator(rows[1])) {
+    startRow = 2;
+  }
+  for (let i = startRow; i < rows.length; i++) {
+    const cells = mdCells(rows[i]);
+    const obj = JValue.ofObj();
+    for (let j = 0; j < headers.length; j++) {
+      obj.set(headers[j], parseScalar(j < cells.length ? cells[j] : ''));
+    }
+    arr.items.push(obj);
+  }
+  return arr;
 }

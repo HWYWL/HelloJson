@@ -256,9 +256,45 @@ export struct PanelHost {
             .borderRadius(6)
             .backgroundColor(this.store.genLanguage === 'java' ?
               this.store.theme().accent : this.store.theme().nodeBgAlt)
+            .margin({ right: 6 })
             .onClick(() => {
               this.store.genLanguage = 'java';
               this.store.outputText = this.store.buildTypes('java');
+            })
+          Text('C#')
+            .fontSize(12)
+            .fontColor(this.store.genLanguage === 'csharp' ? this.store.theme().canvasBg : this.store.theme().text)
+            .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+            .borderRadius(6)
+            .backgroundColor(this.store.genLanguage === 'csharp' ?
+              this.store.theme().accent : this.store.theme().nodeBgAlt)
+            .margin({ right: 6 })
+            .onClick(() => {
+              this.store.genLanguage = 'csharp';
+              this.store.outputText = this.store.buildTypes('csharp');
+            })
+          Text('Swift')
+            .fontSize(12)
+            .fontColor(this.store.genLanguage === 'swift' ? this.store.theme().canvasBg : this.store.theme().text)
+            .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+            .borderRadius(6)
+            .backgroundColor(this.store.genLanguage === 'swift' ?
+              this.store.theme().accent : this.store.theme().nodeBgAlt)
+            .margin({ right: 6 })
+            .onClick(() => {
+              this.store.genLanguage = 'swift';
+              this.store.outputText = this.store.buildTypes('swift');
+            })
+          Text('Dart')
+            .fontSize(12)
+            .fontColor(this.store.genLanguage === 'dart' ? this.store.theme().canvasBg : this.store.theme().text)
+            .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+            .borderRadius(6)
+            .backgroundColor(this.store.genLanguage === 'dart' ?
+              this.store.theme().accent : this.store.theme().nodeBgAlt)
+            .onClick(() => {
+              this.store.genLanguage = 'dart';
+              this.store.outputText = this.store.buildTypes('dart');
             })
         }
         .width('100%')
@@ -302,7 +338,7 @@ export struct PanelHost {
   @Builder
   convertBody() {
     Column() {
-      Row() {
+      Flex({ wrap: FlexWrap.Wrap }) {
         Text('YAML')
           .fontSize(12)
           .fontColor(this.store.targetFormat === 'yaml' ? this.store.theme().canvasBg : this.store.theme().text)
@@ -310,7 +346,7 @@ export struct PanelHost {
           .borderRadius(6)
           .backgroundColor(this.store.targetFormat === 'yaml' ?
             this.store.theme().accent : this.store.theme().nodeBgAlt)
-          .margin({ right: 6 })
+          .margin({ right: 6, bottom: 6 })
           .onClick(() => {
             this.store.targetFormat = 'yaml';
             this.store.outputText = this.store.buildConvert('yaml');
@@ -322,7 +358,7 @@ export struct PanelHost {
           .borderRadius(6)
           .backgroundColor(this.store.targetFormat === 'csv' ?
             this.store.theme().accent : this.store.theme().nodeBgAlt)
-          .margin({ right: 6 })
+          .margin({ right: 6, bottom: 6 })
           .onClick(() => {
             this.store.targetFormat = 'csv';
             this.store.outputText = this.store.buildConvert('csv');
@@ -334,11 +370,63 @@ export struct PanelHost {
           .borderRadius(6)
           .backgroundColor(this.store.targetFormat === 'xml' ?
             this.store.theme().accent : this.store.theme().nodeBgAlt)
-          .margin({ right: 6 })
+          .margin({ right: 6, bottom: 6 })
           .onClick(() => {
             this.store.targetFormat = 'xml';
             this.store.outputText = this.store.buildConvert('xml');
           })
+        Text('TOML')
+          .fontSize(12)
+          .fontColor(this.store.targetFormat === 'toml' ? this.store.theme().canvasBg : this.store.theme().text)
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .borderRadius(6)
+          .backgroundColor(this.store.targetFormat === 'toml' ?
+            this.store.theme().accent : this.store.theme().nodeBgAlt)
+          .margin({ right: 6, bottom: 6 })
+          .onClick(() => {
+            this.store.targetFormat = 'toml';
+            this.store.outputText = this.store.buildConvert('toml');
+          })
+        Text('Properties')
+          .fontSize(12)
+          .fontColor(this.store.targetFormat === 'properties' ? this.store.theme().canvasBg : this.store.theme().text)
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .borderRadius(6)
+          .backgroundColor(this.store.targetFormat === 'properties' ?
+            this.store.theme().accent : this.store.theme().nodeBgAlt)
+          .margin({ right: 6, bottom: 6 })
+          .onClick(() => {
+            this.store.targetFormat = 'properties';
+            this.store.outputText = this.store.buildConvert('properties');
+          })
+        Text('查询串')
+          .fontSize(12)
+          .fontColor(this.store.targetFormat === 'query' ? this.store.theme().canvasBg : this.store.theme().text)
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .borderRadius(6)
+          .backgroundColor(this.store.targetFormat === 'query' ?
+            this.store.theme().accent : this.store.theme().nodeBgAlt)
+          .margin({ right: 6, bottom: 6 })
+          .onClick(() => {
+            this.store.targetFormat = 'query';
+            this.store.outputText = this.store.buildConvert('query');
+          })
+        Text('Markdown')
+          .fontSize(12)
+          .fontColor(this.store.targetFormat === 'markdown' ? this.store.theme().canvasBg : this.store.theme().text)
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .borderRadius(6)
+          .backgroundColor(this.store.targetFormat === 'markdown' ?
+            this.store.theme().accent : this.store.theme().nodeBgAlt)
+          .margin({ bottom: 6 })
+          .onClick(() => {
+            this.store.targetFormat = 'markdown';
+            this.store.outputText = this.store.buildConvert('markdown');
+          })
+      }
+      .width('100%')
+      .margin({ bottom: 2 })
+      Row() {
         Blank()
         Text('应用到编辑器')
           .fontSize(12)
