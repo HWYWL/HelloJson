@@ -7,10 +7,41 @@ import { ResultArea } from './ResultArea';
 /**
  * 居中浮动面板：URL 导入、关于、节点详情、jq / JSONPath、Schema / 类型、格式转换。
  * 内容由 store.modalType 决定，遮罩层与外层定位由页面负责。
+ * 标题栏可拖动，偏移被限制在可视区域内。
  */
 @Component
 export struct PanelHost {
   @Consume('store') store: EditorStore;
+  /** 相对居中位置的拖拽偏移 */
+  @State dragX: number = 0;
+  @State dragY: number = 0;
+  /** 面板实际尺寸，用于限制拖拽范围 */
+  @State panelW: number = 0;
+  @State panelH: number = 0;
+  private dragBaseX: number = 0;
+  private dragBaseY: number = 0;
+
+  private maxDragX(): number {
+    const w = this.store.flexW > 0 ? this.store.flexW : 360;
+    const limit = (w - this.panelW) / 2;
+    return limit > 0 ? limit : 0;
+  }
+
+  private maxDragY(): number {
+    const h = this.store.flexH > 0 ? this.store.flexH : 640;
+    const limit = (h - this.panelH) / 2;
+    return limit > 0 ? limit : 0;
+  }
+
+  private clampValue(value: number, limit: number): number {
+    if (value > limit) {
+      return limit;
+    }
+    if (value < -limit) {
+      return -limit;
+    }
+    return value;
+  }
 
   @Builder
   aboutRow(label: string, value: string) {
@@ -328,6 +359,59 @@ export struct PanelHost {
           .width('100%')
           .margin({ bottom: 8 })
         }
+        if (this.store.genLanguage === 'typescript') {
+          Row() {
+            Text('字段可选')
+              .fontSize(12)
+              .fontColor(this.store.typeOptional ? this.store.theme().canvasBg : this.store.theme().text)
+              .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+              .borderRadius(6)
+              .backgroundColor(this.store.typeOptional ?
+                this.store.theme().accent : this.store.theme().nodeBgAlt)
+              .margin({ right: 6 })
+              .onClick(() => {
+                this.store.typeOptional = !this.store.typeOptional;
+                this.store.outputText = this.store.buildTypes('typescript');
+              })
+            Text('export')
+              .fontSize(12)
+              .fontColor(this.store.typeExport ? this.store.theme().canvasBg : this.store.theme().text)
+              .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+              .borderRadius(6)
+              .backgroundColor(this.store.typeExport ?
+                this.store.theme().accent : this.store.theme().nodeBgAlt)
+              .margin({ right: 6 })
+              .onClick(() => {
+                this.store.typeExport = !this.store.typeExport;
+                this.store.outputText = this.store.buildTypes('typescript');
+              })
+            Text('从 Schema 生成')
+              .fontSize(12)
+              .fontColor(this.store.theme().accent)
+              .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+              .borderRadius(6)
+              .backgroundColor(this.store.theme().nodeBgAlt)
+              .onClick(() => {
+                this.store.generateTypesFromSchema();
+              })
+          }
+          .width('100%')
+          .margin({ bottom: 8 })
+        } else {
+          Row() {
+            Text('从 Schema 生成')
+              .fontSize(12)
+              .fontColor(this.store.theme().accent)
+              .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+              .borderRadius(6)
+              .backgroundColor(this.store.theme().nodeBgAlt)
+              .onClick(() => {
+                this.store.generateTypesFromSchema();
+              })
+          }
+          .width('100%')
+          .margin({ bottom: 8 })
+        }
       }
       ResultArea()
     }
@@ -494,8 +578,18 @@ export struct PanelHost {
           .padding({ left: 10, right: 10, top: 6, bottom: 6 })
           .borderRadius(6)
           .backgroundColor(this.store.theme().nodeBgAlt)
+          .margin({ right: 6 })
           .onClick(() => {
             this.store.runSchemaCheck();
+          })
+        Text('生成数据')
+          .fontSize(12)
+          .fontColor(this.store.theme().accent)
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .borderRadius(6)
+          .backgroundColor(this.store.theme().nodeBgAlt)
+          .onClick(() => {
+            this.store.generateSchemaMock();
           })
       }
       .width('100%')
@@ -735,6 +829,10 @@ export struct PanelHost {
   sheetContent() {
     Column() {
       Row() {
+        Text('⠿')
+          .fontSize(15)
+          .fontColor(this.store.theme().dimText)
+          .margin({ right: 6 })
         Text(this.store.sheetTitle)
           .fontSize(16)
           .fontWeight(FontWeight.Medium)
@@ -753,6 +851,17 @@ export struct PanelHost {
       }
       .width('100%')
       .padding({ bottom: 10 })
+      .gesture(
+        PanGesture({ fingers: 1, distance: 5 })
+          .onActionStart(() => {
+            this.dragBaseX = this.dragX;
+            this.dragBaseY = this.dragY;
+          })
+          .onActionUpdate((event: GestureEvent) => {
+            this.dragX = this.clampValue(this.dragBaseX + event.offsetX, this.maxDragX());
+            this.dragY = this.clampValue(this.dragBaseY + event.offsetY, this.maxDragY());
+          })
+      )
 
       if (this.store.modalType === 'url') {
         this.urlForm()
@@ -802,5 +911,10 @@ export struct PanelHost {
     .borderRadius(18)
     .clip(true)
     .shadow({ radius: 28, color: '#66000000', offsetY: 8 })
+    .translate({ x: this.dragX, y: this.dragY })
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      this.panelW = Number(newValue.width);
+      this.panelH = Number(newValue.height);
+    })
   }
 }

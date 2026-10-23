@@ -9,7 +9,7 @@ export struct TreePanel {
 
   build() {
     List() {
-      ForEach(this.store.treeItems, (item: TreeItem, index: number) => {
+      LazyForEach(this.store.treeData, (item: TreeItem, index: number) => {
         ListItem() {
           Row() {
             if (item.isContainer && item.hasChildren) {
@@ -47,7 +47,7 @@ export struct TreePanel {
             }
           })
         }
-      }, (item: TreeItem) => item.path + '_' + item.collapsed)
+      }, (item: TreeItem) => item.path + '_' + item.depth)
     }
     .width('100%')
     .height('100%')

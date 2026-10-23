@@ -122,8 +122,27 @@ const JAVA_KEYWORDS: Set<string> = new Set<string>([
   'volatile', 'while', 'true', 'false', 'null'
 ]);
 
-/** 生成 TypeScript / Go / Kotlin / Rust / Java 类型定义 */
+/** 类型生成选项（目前作用于 TypeScript 目标） */
+export class TypeOptions {
+  /** 字段可选：`key?: T` */
+  optionalFields: boolean = false;
+  /** 生成 `export interface` / `export type` */
+  exportTypes: boolean = false;
+}
+
+/** 生成 TypeScript / Go / Kotlin / Rust / Java / C# / Swift / Dart 类型定义 */
 export class TypeGenerator {
+  /** 由调用方设置，生成时读取 */
+  options: TypeOptions = new TypeOptions();
+
+  private tsOptional(): string {
+    return this.options.optionalFields ? '?' : '';
+  }
+
+  private tsExport(): string {
+    return this.options.exportTypes ? 'export ' : '';
+  }
+
   ts(root: JValue, rootName: string): string {
     const lines: string[] = [];
     this.tsObject(root, pascalCase(rootName), lines, 0);
@@ -137,8 +156,7 @@ export class TypeGenerator {
         const k = value.keys[i];
         const safeKey = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) ? k : JSON.stringify(k);
         const t = this.tsType(value.values[i], k, indent);
-        fields.push(k + ': ' + t);
-        void safeKey;
+        fields.push(safeKey + this.tsOptional() + ': ' + t);
       }
       return '{ ' + fields.join('; ') + ' }';
     }
@@ -162,10 +180,10 @@ export class TypeGenerator {
 
   private tsObject(value: JValue, name: string, lines: string[], depth: number): void {
     if (value.kind !== JKind.Obj) {
-      lines.push('type ' + name + ' = ' + this.tsType(value, name, '') + ';');
+      lines.push(this.tsExport() + 'type ' + name + ' = ' + this.tsType(value, name, '') + ';');
       return;
     }
-    lines.push('interface ' + name + ' {');
+    lines.push(this.tsExport() + 'interface ' + name + ' {');
     for (let i = 0; i < value.keys.length; i++) {
       const k = value.keys[i];
       const child = value.values[i];
@@ -174,9 +192,9 @@ export class TypeGenerator {
       if (child.kind === JKind.Obj) {
         const childName = pascalCase(k);
         this.tsObject(child, childName, lines, depth + 1);
-        lines.push('  ' + keyText + ': ' + childName + ';');
+        lines.push('  ' + keyText + this.tsOptional() + ': ' + childName + ';');
       } else {
-        lines.push('  ' + keyText + ': ' + this.tsType(child, k, '  ') + ';');
+        lines.push('  ' + keyText + this.tsOptional() + ': ' + this.tsType(child, k, '  ') + ';');
       }
     }
     lines.push('}');

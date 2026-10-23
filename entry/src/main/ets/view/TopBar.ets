@@ -261,7 +261,7 @@ export struct TopBar {
       this.menuDivider()
       this.menuItem('JSON 差异对比…', 'diff')
       this.menuDivider()
-      this.menuItem('文本查找（Ctrl+F）', 'search')
+      this.menuItem('查找替换（Ctrl+F）', 'search')
     }
     .width(216)
     .padding({ top: 6, bottom: 6, left: 4, right: 4 })

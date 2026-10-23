@@ -55,3 +55,37 @@ export class TreeItem {
   collapsed: boolean = false;
   isContainer: boolean = false;
 }
+
+/** 树视图懒加载数据源：几千行时避免一次性创建全部 ListItem */
+export class TreeDataSource implements IDataSource {
+  private items: TreeItem[] = [];
+  private listeners: DataChangeListener[] = [];
+
+  totalCount(): number {
+    return this.items.length;
+  }
+
+  getData(index: number): TreeItem {
+    return this.items[index];
+  }
+
+  registerDataChangeListener(listener: DataChangeListener): void {
+    if (this.listeners.indexOf(listener) < 0) {
+      this.listeners.push(listener);
+    }
+  }
+
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    const idx = this.listeners.indexOf(listener);
+    if (idx >= 0) {
+      this.listeners.splice(idx, 1);
+    }
+  }
+
+  setItems(items: TreeItem[]): void {
+    this.items = items;
+    for (let i = 0; i < this.listeners.length; i++) {
+      this.listeners[i].onDataReloaded();
+    }
+  }
+}

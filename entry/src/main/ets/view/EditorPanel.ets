@@ -106,45 +106,86 @@ export struct EditorPanel {
           this.store.findStep(-1);
         } else if (act === 'next') {
           this.store.findStep(1);
+        } else if (act === 'replace') {
+          this.store.replaceCurrent();
+        } else if (act === 'replaceAll') {
+          this.store.replaceAll();
         } else {
           this.store.closeFind();
         }
       })
   }
 
-  /** 浏览器风格查找栏：输入 → 回车/下一个 */
+  /** 查找栏：第一行查找 + 正则/计数，第二行替换 */
   @Builder
   findBar() {
-    Row() {
-      TextInput({ text: this.store.findQuery, placeholder: '文本查找' })
-        .layoutWeight(1)
-        .height(32)
-        .fontSize(12)
-        .fontFamily('monospace')
-        .padding({ left: 8, right: 8, top: 0, bottom: 0 })
-        .borderRadius(5)
-        .backgroundColor(this.store.theme().canvasBg)
-        .fontColor(this.store.theme().text)
-        .placeholderColor(this.store.theme().dimText)
-        .placeholderFont({ size: 12 })
-        .caretColor(this.store.theme().accent)
-        .onChange((v: string) => {
-          this.store.findQuery = v;
-          this.store.doFind(true);
-        })
-        .onSubmit(() => {
-          this.store.findStep(1);
-        })
-      this.findButton('查找', 'find')
-      this.findButton('上一个', 'prev')
-      this.findButton('下一个', 'next')
-      this.findButton('关闭', 'close')
-      Text(this.store.findTotal === 0 ?
-        (this.store.findQuery.length > 0 ? '无结果' : '0 / 0') :
-        (this.store.findIndex + ' / ' + this.store.findTotal))
-        .fontSize(11)
-        .fontColor(this.store.findTotal === 0 ? this.store.theme().errorColor : this.store.theme().dimText)
-        .margin({ left: 6, right: 4 })
+    Column() {
+      Row() {
+        TextInput({ text: this.store.findQuery, placeholder: '查找' })
+          .layoutWeight(1)
+          .height(32)
+          .fontSize(12)
+          .fontFamily('monospace')
+          .padding({ left: 8, right: 8, top: 0, bottom: 0 })
+          .borderRadius(5)
+          .backgroundColor(this.store.theme().canvasBg)
+          .fontColor(this.store.theme().text)
+          .placeholderColor(this.store.theme().dimText)
+          .placeholderFont({ size: 12 })
+          .caretColor(this.store.theme().accent)
+          .onChange((v: string) => {
+            this.store.findQuery = v;
+            this.store.doFind(true);
+          })
+          .onSubmit(() => {
+            this.store.findStep(1);
+          })
+        Text('.*')
+          .fontSize(11)
+          .fontWeight(this.store.findRegex ? FontWeight.Medium : FontWeight.Normal)
+          .fontColor(this.store.findRegex ? this.store.theme().canvasBg : this.store.theme().text)
+          .padding({ left: 8, right: 8, top: 5, bottom: 5 })
+          .borderRadius(5)
+          .backgroundColor(this.store.findRegex ? this.store.theme().accent : this.store.theme().nodeBgAlt)
+          .margin({ left: 6 })
+          .onClick(() => {
+            this.store.findRegex = !this.store.findRegex;
+            this.store.doFind(true);
+          })
+        Text(this.store.findError.length > 0 ? '正则错误' :
+          (this.store.findTotal === 0 ?
+            (this.store.findQuery.length > 0 ? '无结果' : '0 / 0') :
+            (this.store.findIndex + ' / ' + this.store.findTotal)))
+          .fontSize(11)
+          .fontColor(this.store.findTotal === 0 ? this.store.theme().errorColor : this.store.theme().dimText)
+          .margin({ left: 8, right: 4 })
+        this.findButton('关闭', 'close')
+      }
+      .width('100%')
+
+      Row() {
+        TextInput({ text: this.store.findReplaceText, placeholder: '替换为' })
+          .layoutWeight(1)
+          .height(32)
+          .fontSize(12)
+          .fontFamily('monospace')
+          .padding({ left: 8, right: 8, top: 0, bottom: 0 })
+          .borderRadius(5)
+          .backgroundColor(this.store.theme().canvasBg)
+          .fontColor(this.store.theme().text)
+          .placeholderColor(this.store.theme().dimText)
+          .placeholderFont({ size: 12 })
+          .caretColor(this.store.theme().accent)
+          .onChange((v: string) => {
+            this.store.findReplaceText = v;
+          })
+        this.findButton('上一个', 'prev')
+        this.findButton('下一个', 'next')
+        this.findButton('替换', 'replace')
+        this.findButton('全部替换', 'replaceAll')
+      }
+      .width('100%')
+      .margin({ top: 6 })
     }
     .width('100%')
     .padding({ left: 8, right: 8, top: 4, bottom: 4 })
@@ -226,28 +267,42 @@ export struct EditorPanel {
     .backgroundColor(this.store.theme().canvasBg)
   }
 
-  /** 高亮视图：Span 着色 + 查找命中背景 */
+  /** 高亮视图：行号栏 + Span 着色 + 查找命中背景 */
   @Builder
   highlightView() {
     Scroll(this.textScroller) {
-      Text() {
-        ForEach(this.store.spans, (sp: HSpan, idx: number) => {
-          if (sp.bg.length > 0) {
-            Span(sp.text).fontColor(sp.color).textBackgroundStyle({ color: sp.bg, radius: 2 })
-          } else {
-            Span(sp.text).fontColor(sp.color)
-          }
-        }, (sp: HSpan, idx: number) => this.store.spanSeq.toString() + '_' + idx.toString())
+      Row() {
+        if (this.store.showLineNumbers()) {
+          Text(this.store.lineNumbers)
+            .fontSize(this.store.editorFontSize)
+            .fontFamily('monospace')
+            .fontColor(this.store.theme().dimText)
+            .textAlign(TextAlign.End)
+            .width(this.store.lineNumberWidth())
+            .padding({ right: 6 })
+            .border({ width: { right: 0.5 }, color: this.store.theme().panelBorder })
+        }
+        Text() {
+          ForEach(this.store.spans, (sp: HSpan, idx: number) => {
+            if (sp.bg.length > 0) {
+              Span(sp.text).fontColor(sp.color).textBackgroundStyle({ color: sp.bg, radius: 2 })
+            } else {
+              Span(sp.text).fontColor(sp.color)
+            }
+          }, (sp: HSpan, idx: number) => this.store.spanSeq.toString() + '_' + idx.toString())
+        }
+        .fontSize(this.store.editorFontSize)
+        .fontFamily('monospace')
+        .layoutWeight(1)
+        .textAlign(TextAlign.Start)
+        .wordBreak(this.store.wordWrap ? WordBreak.BREAK_ALL : WordBreak.NORMAL)
+        .copyOption(CopyOptions.LocalDevice)
+        .onAreaChange((oldValue: Area, newValue: Area) => {
+          this.textContentH = Number(newValue.height);
+        })
       }
-      .fontSize(this.store.editorFontSize)
-      .fontFamily('monospace')
       .width(this.store.wordWrap ? '100%' : 20000)
-      .textAlign(TextAlign.Start)
-      .wordBreak(this.store.wordWrap ? WordBreak.BREAK_ALL : WordBreak.NORMAL)
-      .copyOption(CopyOptions.LocalDevice)
-      .onAreaChange((oldValue: Area, newValue: Area) => {
-        this.textContentH = Number(newValue.height);
-      })
+      .alignItems(VerticalAlign.Top)
     }
     .layoutWeight(1)
     .width('100%')
@@ -419,6 +474,9 @@ export struct EditorPanel {
           .width('100%')
           .onChange((value: string) => {
             this.store.onTextChanged(value);
+          })
+          .onTextSelectionChange((selectionStart: number, selectionEnd: number) => {
+            this.store.onCaretChange(selectionStart);
           })
           .onKeyEvent((e: KeyEvent) => {
             this.store.onGlobalKey(e);

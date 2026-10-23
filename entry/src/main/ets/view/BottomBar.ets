@@ -21,7 +21,8 @@ export struct BottomBar {
         .borderRadius(4)
         .backgroundColor(this.store.theme().nodeBgAlt)
         .margin({ right: 6 })
-      Text('行 ' + this.store.lineCount + ' / 字符 ' + this.store.charCount)
+      Text('行 ' + this.store.caretLine + ' 列 ' + this.store.caretColumn + ' / 共 ' +
+        this.store.lineCount + ' 行 ' + this.store.charCount + ' 字符')
         .fontSize(10)
         .fontColor(this.store.theme().dimText)
         .padding({ left: 7, right: 7, top: 2, bottom: 2 })

@@ -28,8 +28,9 @@ import {
 import { buildSvg } from '../core/SvgExport';
 import { DiffLine, DiffResult, diffLines } from '../core/JsonDiff';
 import { SchemaError, SchemaValidator } from '../core/SchemaValidator';
+import { MockResult, mockGenerator } from '../core/MockGen';
 import { AppConfig, configStore, TabRecord } from '../core/Storage';
-import { DocTab, HSpan, TabInfo, TreeItem } from './Types';
+import { DocTab, HSpan, TabInfo, TreeDataSource, TreeItem } from './Types';
 import { SAMPLE, SAMPLE_CSV, SAMPLE_XML, SAMPLE_YAML } from './Samples';
 
 /** 撤销栈最大步数 */
@@ -74,13 +75,30 @@ export class EditorStore {
   genLanguage: string = 'typescript';
   /** Java 生成模式：false = getter/setter，true = Lombok @Data */
   javaLombok: boolean = false;
+  /** TypeScript 生成：字段可选（key?: T） */
+  typeOptional: boolean = false;
+  /** TypeScript 生成：export interface */
+  typeExport: boolean = false;
   targetFormat: string = 'yaml';
   findVisible: boolean = false;
   findQuery: string = '';
+  /** 查找是否使用正则 */
+  findRegex: boolean = false;
+  /** 替换内容 */
+  findReplaceText: string = '';
+  /** 正则表达式错误提示 */
+  findError: string = '';
   findIndex: number = 0;
   findTotal: number = 0;
+  /** 光标所在行列（1 基），由编辑区回报 */
+  caretLine: number = 1;
+  caretColumn: number = 1;
+  /** 行号栏文本（每行一个右对齐数字），行数过多时为空 */
+  lineNumbers: string = '';
   stackVertical: boolean = true;
   treeItems: TreeItem[] = [];
+  /** 树视图懒加载数据源（LazyForEach 用） */
+  treeData: TreeDataSource = new TreeDataSource();
   busy: boolean = false;
   /** 编辑器设置：格式化缩进宽度（2 / 4 空格） */
   indentWidth: number = 2;
@@ -153,6 +171,8 @@ export class EditorStore {
   private treeCollapsed: Set<string> = new Set<string>();
   /** 文本查找命中位置（字符偏移，升序） */
   private findMatches: number[] = [];
+  /** 与 findMatches 一一对应的命中长度（正则模式长度可变） */
+  private findLengths: number[] = [];
   private parseTimer: number = -1;
   /** 激活标签的落盘节流定时器 */
   private persistTimer: number = -1;
@@ -333,6 +353,7 @@ export class EditorStore {
     this.nodeCount = 0;
     this.edgeCount = 0;
     this.treeItems = [];
+    this.treeData.setItems([]);
     this.spans = [];
     this.errorMsg = '';
     this.errorLine = 0;
@@ -682,6 +703,7 @@ export class EditorStore {
       this.nodeCount = 0;
       this.edgeCount = 0;
       this.treeItems = [];
+      this.treeData.setItems([]);
       this.spans = [];
       this.graphTruncated = false;
       this.treeTruncated = false;
@@ -724,6 +746,53 @@ export class EditorStore {
       }
     }
     this.lineCount = lines;
+    this.rebuildLineNumbers(lines);
+  }
+
+  /** 行号栏文本：按最大行号宽度右对齐；超过 2000 行不显示，避免大文档卡顿 */
+  private rebuildLineNumbers(lines: number): void {
+    if (lines > 2000) {
+      this.lineNumbers = '';
+      return;
+    }
+    const width = lines.toString().length;
+    const parts: string[] = [];
+    for (let i = 1; i <= lines; i++) {
+      let s = i.toString();
+      while (s.length < width) {
+        s = ' ' + s;
+      }
+      parts.push(s);
+    }
+    this.lineNumbers = parts.join('\n');
+  }
+
+  /** 编辑区回报光标偏移，换算成行列（1 基） */
+  onCaretChange(offset: number): void {
+    let line = 1;
+    let col = 1;
+    const end = Math.min(offset, this.jsonText.length);
+    for (let i = 0; i < end; i++) {
+      if (this.jsonText.charAt(i) === '\n') {
+        line++;
+        col = 1;
+      } else {
+        col++;
+      }
+    }
+    this.caretLine = line;
+    this.caretColumn = col;
+  }
+
+  /** 行号栏是否显示：仅关闭自动换行时显示（保证行号与内容对齐） */
+  showLineNumbers(): boolean {
+    return !this.wordWrap && this.lineNumbers.length > 0;
+  }
+
+  /** 行号栏宽度：按最大行号位数与当前字号估算（等宽字体） */
+  lineNumberWidth(): number {
+    const digits = this.lineCount.toString().length;
+    return digits * this.editorFontSize * 0.62 + 14;
   }
 
   /** 生成按数据类型着色的片段 */
@@ -898,28 +967,23 @@ export class EditorStore {
   closeFind(): void {
     this.findVisible = false;
     this.findMatches = [];
+    this.findLengths = [];
     this.findTotal = 0;
     this.findIndex = 0;
+    this.findError = '';
     this.refreshHighlight();
   }
 
   /** 重新计算命中位置；jump 为 true 时跳到首个命中 */
   doFind(jump: boolean): void {
     this.findMatches = [];
-    const q = this.findQuery.toLowerCase();
-    if (q.length > 0) {
-      const lower = this.jsonText.toLowerCase();
-      let from = 0;
-      while (from <= lower.length - q.length) {
-        const idx = lower.indexOf(q, from);
-        if (idx < 0) {
-          break;
-        }
-        this.findMatches.push(idx);
-        if (this.findMatches.length >= 5000) {
-          break;
-        }
-        from = idx + q.length;
+    this.findLengths = [];
+    this.findError = '';
+    if (this.findQuery.length > 0) {
+      if (this.findRegex) {
+        this.collectRegexMatches();
+      } else {
+        this.collectTextMatches();
       }
     }
     this.findTotal = this.findMatches.length;
@@ -930,6 +994,47 @@ export class EditorStore {
       this.findIndex = this.findTotal;
     }
     this.refreshHighlight();
+  }
+
+  /** 字面量匹配（大小写不敏感，不重叠前进） */
+  private collectTextMatches(): void {
+    const q = this.findQuery.toLowerCase();
+    const lower = this.jsonText.toLowerCase();
+    let from = 0;
+    while (from <= lower.length - q.length) {
+      const idx = lower.indexOf(q, from);
+      if (idx < 0) {
+        break;
+      }
+      this.findMatches.push(idx);
+      this.findLengths.push(q.length);
+      if (this.findMatches.length >= 5000) {
+        break;
+      }
+      from = idx + q.length;
+    }
+  }
+
+  /** 正则匹配（gi 标志，零长匹配按 1 个字符前进，避免死循环） */
+  private collectRegexMatches(): void {
+    try {
+      const re = new RegExp(this.findQuery, 'gi');
+      let m = re.exec(this.jsonText);
+      while (m !== null) {
+        const text = m[0];
+        this.findMatches.push(m.index);
+        this.findLengths.push(text.length > 0 ? text.length : 1);
+        if (this.findMatches.length >= 5000) {
+          break;
+        }
+        if (text.length === 0) {
+          re.lastIndex = m.index + 1;
+        }
+        m = re.exec(this.jsonText);
+      }
+    } catch (e) {
+      this.findError = '正则表达式无效';
+    }
   }
 
   /** step: 1 下一个，-1 上一个 */
@@ -962,10 +1067,68 @@ export class EditorStore {
     return this.findMatches[this.findIndex - 1];
   }
 
+  /** 当前命中的长度（正则模式下可变） */
+  matchLength(): number {
+    if (this.findIndex < 1 || this.findIndex > this.findLengths.length) {
+      return 0;
+    }
+    return this.findLengths[this.findIndex - 1];
+  }
+
+  /** 替换当前命中，并重新计算命中 */
+  replaceCurrent(): void {
+    const off = this.matchOffset();
+    const len = this.matchLength();
+    if (off < 0 || len <= 0) {
+      this.toast('没有可替换的命中');
+      return;
+    }
+    this.recordHistory(this.jsonText, false);
+    this.jsonText = this.jsonText.substring(0, off) + this.findReplaceText +
+      this.jsonText.substring(off + len);
+    this.parseAndRender(false);
+    this.autoFitEditorWidth();
+    this.doFind(false);
+    this.toast('已替换 1 处');
+  }
+
+  /** 替换全部命中；字面量模式倒序拼接，避免偏移错位 */
+  replaceAll(): void {
+    if (this.findMatches.length === 0) {
+      this.toast('没有可替换的命中');
+      return;
+    }
+    this.recordHistory(this.jsonText, false);
+    if (this.findRegex) {
+      try {
+        const re = new RegExp(this.findQuery, 'gi');
+        this.jsonText = this.jsonText.replace(re, this.findReplaceText);
+      } catch (e) {
+        this.toast('正则表达式无效');
+        return;
+      }
+    } else {
+      const parts: string[] = [];
+      let last = 0;
+      for (let i = 0; i < this.findMatches.length; i++) {
+        const off = this.findMatches[i];
+        const len = this.findLengths[i];
+        parts.push(this.jsonText.substring(last, off));
+        parts.push(this.findReplaceText);
+        last = off + len;
+      }
+      parts.push(this.jsonText.substring(last));
+      this.jsonText = parts.join('');
+    }
+    this.parseAndRender(false);
+    this.autoFitEditorWidth();
+    this.doFind(false);
+    this.toast('已全部替换');
+  }
+
   /** 按命中位置切分片段，给命中文字加背景（当前命中用强调色） */
   private decorateSpans(src: HSpan[], t: GraphTheme): HSpan[] {
-    const q = this.findQuery.length;
-    if (!this.findVisible || q === 0 || this.findMatches.length === 0) {
+    if (!this.findVisible || this.findMatches.length === 0) {
       return src;
     }
     const out: HSpan[] = [];
@@ -979,7 +1142,7 @@ export class EditorStore {
       off = e;
       let pos = s;
       while (pos < e) {
-        while (mi < this.findMatches.length && this.findMatches[mi] + q <= pos) {
+        while (mi < this.findMatches.length && this.findMatches[mi] + this.findLengths[mi] <= pos) {
           mi++;
         }
         if (mi >= this.findMatches.length) {
@@ -987,21 +1150,27 @@ export class EditorStore {
           break;
         }
         const ms = this.findMatches[mi];
+        const me = ms + this.findLengths[mi];
         if (ms >= e) {
           out.push(new HSpan(sp.text.substring(pos - s), sp.color));
           break;
         }
         if (ms > pos) {
           out.push(new HSpan(sp.text.substring(pos - s, ms - s), sp.color));
+          pos = ms;
         }
-        const me = Math.min(ms + q, e);
-        const isCur = mi === cur;
-        out.push(new HSpan(sp.text.substring(ms - s, me - s),
-          isCur ? t.matchTextActive : sp.color,
-          isCur ? t.matchBgActive : t.matchBg));
-        pos = me;
-        if (me === ms + q) {
+        const segEnd = Math.min(me, e);
+        if (segEnd > pos) {
+          const isCur = mi === cur;
+          out.push(new HSpan(sp.text.substring(pos - s, segEnd - s),
+            isCur ? t.matchTextActive : sp.color,
+            isCur ? t.matchBgActive : t.matchBg));
+          pos = segEnd;
+        }
+        if (me <= e) {
           mi++;
+        } else {
+          break;
         }
       }
     }
@@ -1016,6 +1185,7 @@ export class EditorStore {
     this.nodeCount = 0;
     this.edgeCount = 0;
     this.treeItems = [];
+    this.treeData.setItems([]);
     this.selectedPath = '';
     this.selectedNodeId = '';
     this.findMatches = [];
@@ -1309,6 +1479,7 @@ export class EditorStore {
   refreshTree(): void {
     if (this.root === null) {
       this.treeItems = [];
+      this.treeData.setItems([]);
       this.treeTruncated = false;
       return;
     }
@@ -1319,6 +1490,7 @@ export class EditorStore {
       this.toast('文档较大，树视图仅展开前 ' + items.length.toString() + ' 项');
     }
     this.treeItems = items;
+    this.treeData.setItems(items);
   }
 
   toggleTreeItem(path: string): void {
@@ -1411,6 +1583,23 @@ export class EditorStore {
     this.schemaErrors = [];
     this.schemaErrorPaths = [];
     this.repaint();
+  }
+
+  /** 按当前 schema 生成示例数据，写入新标签 */
+  generateSchemaMock(): void {
+    if (this.schemaText.trim().length === 0) {
+      this.toast('请先载入 schema');
+      return;
+    }
+    const res: MockResult = mockGenerator.generate(this.schemaText);
+    if (!res.ok || res.value === null) {
+      this.toast('生成失败：' + res.message);
+      return;
+    }
+    this.openDoc('Schema 示例', stringifyJson(res.value, this.indentWidth, false));
+    this.autoFitEditorWidth();
+    this.sheetVisible = false;
+    this.toast('已按 schema 生成示例数据');
   }
 
   runSchemaCheck(): void {
@@ -1880,28 +2069,50 @@ export class EditorStore {
     if (this.root === null) {
       return '';
     }
+    return this.typesFor(this.root, language);
+  }
+
+  /** 对指定 JSON 生成类型定义（TypeScript 选项在此生效） */
+  private typesFor(root: JValue, language: string): string {
+    typeGenerator.options.optionalFields = this.typeOptional;
+    typeGenerator.options.exportTypes = this.typeExport;
     if (language === 'go') {
-      return typeGenerator.go(this.root, 'Root');
+      return typeGenerator.go(root, 'Root');
     }
     if (language === 'kotlin') {
-      return typeGenerator.kotlin(this.root, 'Root');
+      return typeGenerator.kotlin(root, 'Root');
     }
     if (language === 'rust') {
-      return typeGenerator.rust(this.root, 'Root');
+      return typeGenerator.rust(root, 'Root');
     }
     if (language === 'java') {
-      return typeGenerator.java(this.root, 'Root', this.javaLombok);
+      return typeGenerator.java(root, 'Root', this.javaLombok);
     }
     if (language === 'csharp') {
-      return typeGenerator.csharp(this.root, 'Root');
+      return typeGenerator.csharp(root, 'Root');
     }
     if (language === 'swift') {
-      return typeGenerator.swift(this.root, 'Root');
+      return typeGenerator.swift(root, 'Root');
     }
     if (language === 'dart') {
-      return typeGenerator.dart(this.root, 'Root');
+      return typeGenerator.dart(root, 'Root');
     }
-    return typeGenerator.ts(this.root, 'Root');
+    return typeGenerator.ts(root, 'Root');
+  }
+
+  /** 按已载入的 schema 生成示例数据，再据此推断当前语言的类型定义 */
+  generateTypesFromSchema(): void {
+    if (this.schemaText.trim().length === 0) {
+      this.toast('请先在「Schema 校验」中载入 schema');
+      return;
+    }
+    const res: MockResult = mockGenerator.generate(this.schemaText);
+    if (!res.ok || res.value === null) {
+      this.toast('生成失败：' + res.message);
+      return;
+    }
+    this.outputText = this.typesFor(res.value, this.genLanguage);
+    this.toast('已按 schema 示例推断类型');
   }
 
   buildConvert(format: string): string {
