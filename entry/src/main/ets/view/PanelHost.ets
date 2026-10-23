@@ -1,4 +1,5 @@
 import { DiffLine } from '../core/JsonDiff';
+import { SchemaError } from '../core/SchemaValidator';
 import { EditorStore } from '../viewmodel/EditorStore';
 import { TabInfo } from '../viewmodel/Types';
 import { ResultArea } from './ResultArea';
@@ -199,7 +200,7 @@ export struct PanelHost {
   genBody() {
     Column() {
       if (this.store.modalType === 'type') {
-        Row() {
+        Flex({ wrap: FlexWrap.Wrap }) {
           Text('TypeScript')
             .fontSize(12)
             .fontColor(this.store.genLanguage === 'typescript' ? this.store.theme().canvasBg : this.store.theme().text)
@@ -243,13 +244,54 @@ export struct PanelHost {
             .borderRadius(6)
             .backgroundColor(this.store.genLanguage === 'rust' ?
               this.store.theme().accent : this.store.theme().nodeBgAlt)
+            .margin({ right: 6 })
             .onClick(() => {
               this.store.genLanguage = 'rust';
               this.store.outputText = this.store.buildTypes('rust');
             })
+          Text('Java')
+            .fontSize(12)
+            .fontColor(this.store.genLanguage === 'java' ? this.store.theme().canvasBg : this.store.theme().text)
+            .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+            .borderRadius(6)
+            .backgroundColor(this.store.genLanguage === 'java' ?
+              this.store.theme().accent : this.store.theme().nodeBgAlt)
+            .onClick(() => {
+              this.store.genLanguage = 'java';
+              this.store.outputText = this.store.buildTypes('java');
+            })
         }
         .width('100%')
         .margin({ bottom: 8 })
+        if (this.store.genLanguage === 'java') {
+          Row() {
+            Text('get / set')
+              .fontSize(12)
+              .fontColor(this.store.javaLombok ? this.store.theme().text : this.store.theme().canvasBg)
+              .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+              .borderRadius(6)
+              .backgroundColor(this.store.javaLombok ?
+                this.store.theme().nodeBgAlt : this.store.theme().accent)
+              .margin({ right: 6 })
+              .onClick(() => {
+                this.store.javaLombok = false;
+                this.store.outputText = this.store.buildTypes('java');
+              })
+            Text('Lombok')
+              .fontSize(12)
+              .fontColor(this.store.javaLombok ? this.store.theme().canvasBg : this.store.theme().text)
+              .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+              .borderRadius(6)
+              .backgroundColor(this.store.javaLombok ?
+                this.store.theme().accent : this.store.theme().nodeBgAlt)
+              .onClick(() => {
+                this.store.javaLombok = true;
+                this.store.outputText = this.store.buildTypes('java');
+              })
+          }
+          .width('100%')
+          .margin({ bottom: 8 })
+        }
       }
       ResultArea()
     }
@@ -314,6 +356,139 @@ export struct PanelHost {
     }
     .width('100%')
     .layoutWeight(1)
+  }
+
+  /** schema 校验面板：载入 schema → 校验 → 错误逐条定位 */
+  @Builder
+  schemaCheckBody() {
+    Column() {
+      Row() {
+        Text(this.store.schemaName.length > 0 ? this.store.schemaName : '未载入 schema')
+          .fontSize(12)
+          .fontColor(this.store.schemaName.length > 0 ? this.store.theme().text : this.store.theme().dimText)
+          .layoutWeight(1)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ right: 8 })
+        Text('选文件')
+          .fontSize(12)
+          .fontColor(this.store.theme().canvasBg)
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .borderRadius(6)
+          .backgroundColor(this.store.theme().accent)
+          .margin({ right: 6 })
+          .onClick(() => {
+            this.store.pickSchemaFile();
+          })
+        Text('粘贴')
+          .fontSize(12)
+          .fontColor(this.store.theme().text)
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .borderRadius(6)
+          .backgroundColor(this.store.theme().nodeBgAlt)
+          .margin({ right: 6 })
+          .onClick(() => {
+            this.store.pasteSchemaFromClipboard();
+          })
+        Text('示例')
+          .fontSize(12)
+          .fontColor(this.store.theme().text)
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .borderRadius(6)
+          .backgroundColor(this.store.theme().nodeBgAlt)
+          .margin({ right: 6 })
+          .onClick(() => {
+            this.store.useDemoSchema();
+          })
+        Text('重校验')
+          .fontSize(12)
+          .fontColor(this.store.theme().text)
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .borderRadius(6)
+          .backgroundColor(this.store.theme().nodeBgAlt)
+          .onClick(() => {
+            this.store.runSchemaCheck();
+          })
+      }
+      .width('100%')
+      .margin({ bottom: 8 })
+
+      if (this.store.schemaMessage.length > 0) {
+        Text(this.store.schemaMessage)
+          .fontSize(11)
+          .fontColor(this.store.theme().errorColor)
+          .width('100%')
+          .margin({ bottom: 6 })
+      }
+
+      if (this.store.schemaChecked) {
+        Text(this.store.schemaOk ?
+          '校验通过：文档符合该 schema' :
+          ('不符合该 schema：共 ' + this.store.schemaErrors.length.toString() + ' 处问题'))
+          .fontSize(12)
+          .fontColor(this.store.schemaOk ? this.store.theme().successColor : this.store.theme().errorColor)
+          .width('100%')
+          .margin({ bottom: 6 })
+      }
+
+      if (this.store.schemaErrors.length > 0) {
+        List() {
+          ForEach(this.store.schemaErrors, (err: SchemaError, index: number) => {
+            ListItem() {
+              Row() {
+                Text('L' + err.line.toString())
+                  .fontSize(10)
+                  .fontColor(this.store.theme().errorColor)
+                  .width(44)
+                  .textAlign(TextAlign.End)
+                  .margin({ right: 8 })
+                Column() {
+                  Text(err.path)
+                    .fontSize(11)
+                    .fontFamily('monospace')
+                    .fontColor(this.store.theme().text)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .width('100%')
+                  Text(err.message)
+                    .fontSize(10)
+                    .fontColor(this.store.theme().dimText)
+                    .maxLines(2)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .width('100%')
+                }
+                .layoutWeight(1)
+                .alignItems(HorizontalAlign.Start)
+              }
+              .width('100%')
+              .padding({ top: 5, bottom: 5 })
+              .onClick(() => {
+                this.store.gotoSchemaError(index);
+              })
+            }
+          }, (err: SchemaError, index: number) => index.toString() + '_' + err.path + '_' + err.message)
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .backgroundColor(this.store.theme().canvasBg)
+        .borderRadius(8)
+        .padding(4)
+        .divider({ strokeWidth: 0.5, color: this.store.theme().panelBorder })
+        .scrollBar(BarState.Auto)
+      } else if (this.store.schemaText.length === 0) {
+        Text('点「示例」可一键体验，或选择一份 JSON Schema（draft-07）文件校验当前文档。\n' +
+          '支持 type / required / properties / additionalProperties / items / enum / const /\n' +
+          'minimum / maximum / minLength / maxLength / pattern / allOf / anyOf / oneOf / not /\n' +
+          '本地 $ref（#/definitions、#/$defs）。')
+          .fontSize(11)
+          .fontColor(this.store.theme().dimText)
+          .width('100%')
+          .layoutWeight(1)
+      }
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .alignItems(HorizontalAlign.Start)
   }
 
   /** A / B 两侧的标签选择条（外观依赖状态，写成无参 Builder） */
@@ -517,6 +692,10 @@ export struct PanelHost {
 
       if (this.store.modalType === 'diff') {
         this.diffBody()
+      }
+
+      if (this.store.modalType === 'schemaCheck') {
+        this.schemaCheckBody()
       }
     }
     .width('100%')

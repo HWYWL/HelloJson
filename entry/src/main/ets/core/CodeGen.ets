@@ -112,7 +112,17 @@ export class SchemaGenerator {
   }
 }
 
-/** 生成 TypeScript / Go / Kotlin / Rust 类型定义 */
+/** Java 保留字：生成的字段名撞上时要改名，否则无法编译 */
+const JAVA_KEYWORDS: Set<string> = new Set<string>([
+  'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class', 'const',
+  'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final', 'finally', 'float',
+  'for', 'goto', 'if', 'implements', 'import', 'instanceof', 'int', 'interface', 'long', 'native',
+  'new', 'package', 'private', 'protected', 'public', 'return', 'short', 'static', 'strictfp',
+  'super', 'switch', 'synchronized', 'this', 'throw', 'throws', 'transient', 'try', 'void',
+  'volatile', 'while', 'true', 'false', 'null'
+]);
+
+/** 生成 TypeScript / Go / Kotlin / Rust / Java 类型定义 */
 export class TypeGenerator {
   ts(root: JValue, rootName: string): string {
     const lines: string[] = [];
@@ -317,6 +327,199 @@ export class TypeGenerator {
     lines.push('}');
     lines.push('');
     void nested;
+  }
+
+  // ---------- Java ----------
+
+  private javaUsed: Set<string> = new Set<string>();
+
+  /**
+   * 生成 POJO：嵌套静态类 + 私有字段，key 与字段名不一致时加 @JsonProperty。
+   * lombok 为 true 时用 @Data 代替 getter/setter。
+   */
+  java(root: JValue, rootName: string, lombok: boolean = false): string {
+    this.javaUsed = new Set<string>();
+    const lines: string[] = [];
+    if (root.kind !== JKind.Obj) {
+      lines.push('// 根节点不是 JSON 对象，无法生成 Java POJO');
+      return lines.join('\n');
+    }
+    if (this.javaNeedsRename(root)) {
+      lines.push('import com.fasterxml.jackson.annotation.JsonProperty;');
+    }
+    if (this.javaHasArray(root)) {
+      lines.push('import java.util.List;');
+    }
+    if (lombok) {
+      lines.push('import lombok.Data;');
+    }
+    if (lines.length > 0) {
+      lines.push('');
+    }
+    this.javaClass(root, this.uniqueJavaName(pascalCase(rootName)), lines, 0, lombok);
+    return lines.join('\n');
+  }
+
+  private javaPad(depth: number): string {
+    let pad = '';
+    for (let i = 0; i < depth; i++) {
+      pad += '    ';
+    }
+    return pad;
+  }
+
+  private uniqueJavaName(base: string): string {
+    let name = base;
+    let seq = 2;
+    while (this.javaUsed.has(name)) {
+      name = base + seq.toString();
+      seq++;
+    }
+    this.javaUsed.add(name);
+    return name;
+  }
+
+  /** JSON key → Java 字段名（首单词小写驼峰，非法字符转驼峰分隔，保留字加后缀） */
+  private javaFieldName(key: string): string {
+    const cleaned = key.replace(new RegExp('[^A-Za-z0-9]+', 'g'), ' ').trim();
+    const parts = cleaned.length === 0 ? [] : cleaned.split(' ');
+    let out = '';
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      if (p.length === 0) {
+        continue;
+      }
+      if (out.length === 0) {
+        out += p.charAt(0).toLowerCase() + p.substring(1);
+      } else {
+        out += p.charAt(0).toUpperCase() + p.substring(1);
+      }
+    }
+    if (out.length === 0) {
+      out = 'value';
+    }
+    if (/^[0-9]/.test(out)) {
+      out = 'n' + out;
+    }
+    if (JAVA_KEYWORDS.has(out)) {
+      out = out + 'Value';
+    }
+    return out;
+  }
+
+  private javaEscape(key: string): string {
+    return key.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  private javaHasArray(value: JValue): boolean {
+    if (value.kind === JKind.Arr) {
+      return true;
+    }
+    if (value.kind === JKind.Obj) {
+      for (let i = 0; i < value.values.length; i++) {
+        if (this.javaHasArray(value.values[i])) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private javaNeedsRename(value: JValue): boolean {
+    if (value.kind === JKind.Obj) {
+      for (let i = 0; i < value.keys.length; i++) {
+        if (this.javaFieldName(value.keys[i]) !== value.keys[i]) {
+          return true;
+        }
+        if (this.javaNeedsRename(value.values[i])) {
+          return true;
+        }
+      }
+    } else if (value.kind === JKind.Arr) {
+      for (let i = 0; i < value.items.length; i++) {
+        if (this.javaNeedsRename(value.items[i])) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** 只解析类型，子对象登记到 nested 供外层类输出后统一生成 */
+  private javaType(value: JValue, keyName: string, nested: JValue[], nestedNames: string[]): string {
+    if (value.kind === JKind.Obj) {
+      const name = this.uniqueJavaName(pascalCase(keyName));
+      nested.push(value);
+      nestedNames.push(name);
+      return name;
+    }
+    if (value.kind === JKind.Arr) {
+      if (value.items.length === 0) {
+        return 'List<Object>';
+      }
+      return 'List<' + this.javaType(value.items[0], singular(keyName), nested, nestedNames) + '>';
+    }
+    if (value.kind === JKind.Str) {
+      return 'String';
+    }
+    if (value.kind === JKind.Num) {
+      return 'Double';
+    }
+    if (value.kind === JKind.Bool) {
+      return 'Boolean';
+    }
+    return 'Object';
+  }
+
+  private javaClass(value: JValue, name: string, lines: string[], depth: number, lombok: boolean): void {
+    const pad = this.javaPad(depth);
+    const inner = pad + '    ';
+    const keys = value.keys;
+    const fields: string[] = [];
+    const types: string[] = [];
+    const nested: JValue[] = [];
+    const nestedNames: string[] = [];
+    for (let i = 0; i < keys.length; i++) {
+      fields.push(this.javaFieldName(keys[i]));
+      types.push(this.javaType(value.values[i], keys[i], nested, nestedNames));
+    }
+
+    if (lombok) {
+      lines.push(pad + '@Data');
+    }
+    lines.push(pad + (depth === 0 ? 'public class ' : 'public static class ') + name + ' {');
+    for (let i = 0; i < fields.length; i++) {
+      if (fields[i] !== keys[i]) {
+        lines.push(inner + '@JsonProperty("' + this.javaEscape(keys[i]) + '")');
+      }
+      lines.push(inner + 'private ' + types[i] + ' ' + fields[i] + ';');
+    }
+    if (fields.length > 0) {
+      lines.push('');
+    }
+    if (!lombok) {
+      for (let i = 0; i < fields.length; i++) {
+        const cap = fields[i].charAt(0).toUpperCase() + fields[i].substring(1);
+        lines.push(inner + 'public ' + types[i] + ' get' + cap + '() {');
+        lines.push(inner + '    return ' + fields[i] + ';');
+        lines.push(inner + '}');
+        lines.push('');
+        lines.push(inner + 'public void set' + cap + '(' + types[i] + ' ' + fields[i] + ') {');
+        lines.push(inner + '    this.' + fields[i] + ' = ' + fields[i] + ';');
+        lines.push(inner + '}');
+        if (i < fields.length - 1) {
+          lines.push('');
+        }
+      }
+    }
+    for (let i = 0; i < nested.length; i++) {
+      if (!lombok || i > 0) {
+        lines.push('');
+      }
+      this.javaClass(nested[i], nestedNames[i], lines, depth + 1, lombok);
+    }
+    lines.push(pad + '}');
+    lines.push('');
   }
 }
 

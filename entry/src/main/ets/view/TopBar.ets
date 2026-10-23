@@ -268,8 +268,9 @@ export struct TopBar {
   generateMenu() {
     Column() {
       this.menuItem('JSON Schema', 'schema')
+      this.menuItem('JSON Schema 校验…', 'schemaCheck')
       this.menuDivider()
-      this.menuItem('类型定义（TS / Go / Kotlin / Rust）', 'types')
+      this.menuItem('类型定义（TS / Go / Kotlin / Rust / Java）', 'types')
       this.menuDivider()
       this.menuItem('格式转换（YAML / CSV / XML）', 'convert')
     }

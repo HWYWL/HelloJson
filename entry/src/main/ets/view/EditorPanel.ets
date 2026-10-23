@@ -20,19 +20,27 @@ export struct EditorPanel {
     this.store.onScrollToMatch = () => {
       this.scrollToMatch();
     };
+    this.store.onScrollToOffset = (offset: number) => {
+      this.scrollToOffset(offset);
+    };
   }
 
   aboutToDisappear(): void {
     this.store.onScrollToMatch = () => {
     };
+    this.store.onScrollToOffset = (offset: number) => {
+    };
+  }
+
+  private scrollToMatch(): void {
+    this.scrollToOffset(this.store.matchOffset());
   }
 
   /**
-   * 滚动到当前命中：按字符偏移在全文中的比例估算纵向位置。
+   * 滚动到指定字符偏移：按偏移在全文中的比例估算纵向位置。
    * 高亮视图是等宽字体 + 固定宽度换行，视觉高度与字符数近似成正比。
    */
-  private scrollToMatch(): void {
-    const offset = this.store.matchOffset();
+  private scrollToOffset(offset: number): void {
     if (offset < 0) {
       return;
     }

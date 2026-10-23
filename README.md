@@ -15,7 +15,8 @@
 | 快捷键 | `Ctrl+S` 保存、`Ctrl+Z` 撤销、`Ctrl+Y` / `Ctrl+Shift+Z` 重做、`Ctrl+O` 打开、`Ctrl+N` 新建标签、`Ctrl+W` 关闭标签、`Ctrl+F` 查找、`Ctrl+Shift+F` 格式化、`Esc` 关闭弹层 |
 | 格式化 | 2 空格格式化、压缩单行、递归键排序、转义 / 反转义、JSON 校验 |
 | 查询 | jq 子集（字段/索引/切片/迭代/递归/管道/逗号/构造/内置函数/比较与算术）、JSONPath 子集（通配、递归下降、切片、过滤表达式）、全文搜索并高亮命中节点 |
-| 代码生成 | JSON Schema (draft-07)、TypeScript / Go / Kotlin / Rust 类型定义 |
+| 代码生成 | JSON Schema (draft-07)、TypeScript / Go / Kotlin / Rust / Java 类型定义（Java 可选 getter/setter 或 Lombok `@Data`） |
+| Schema 校验 | 载入自定义 schema 校验当前文档，错误带 JSON 路径与行号；点击定位到图形节点，出错节点及其祖先描红 |
 | 格式转换 | JSON ⇄ YAML / CSV / XML（双向，可写回编辑器） |
 | 导入导出 | 文件导入（自动识别 .json/.yaml/.csv/.xml）、URL 导入、剪贴板粘贴、保存 JSON、导出 SVG（整图矢量）/ PNG / JPEG |
 | 其他 | 深色/浅色主题、横竖屏自适应分栏、全屏图形模式、配置与内容本地持久化 |

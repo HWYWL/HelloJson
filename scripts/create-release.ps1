@@ -1,25 +1,63 @@
-﻿# 一键创建 GitHub Release 并上传 HAP 资产
+﻿# 一键创建 GitHub Release 并上传安装包
 # 用法:
 #   powershell -ExecutionPolicy Bypass -File .\scripts\create-release.ps1 -Token <PAT>
-#   或先设置环境变量 GITHUB_TOKEN 后不带 -Token
+#   powershell -ExecutionPolicy Bypass -File .\scripts\create-release.ps1 -DryRun
+#   powershell -ExecutionPolicy Bypass -File .\scripts\create-release.ps1 -Version 0.3.0 -Asset <路径>
+# 版本号 / tag / 标题 / 说明文件 / 资产名默认都由 AppScope/app.json5 与日期推导，发新版不用改脚本。
 # 令牌权限: classic PAT 勾选 repo；fine-grained PAT 需 Contents: Read and write
 param(
     [string]$Token = $env:GITHUB_TOKEN,
     [string]$Repo = "HWYWL/HelloJson",
-    [string]$Tag = "v0.1.0-20261022",
-    [string]$Title = "v0.1.0-20261022 · HelloJson 首发版",
-    [string]$NotesFile = "docs/RELEASE-v0.1.0.md",
-    [string]$Asset = "build-output/v0.1.0-20261022-unsigned.hap",
+    [string]$Version = "",
+    [string]$Date = (Get-Date -Format 'yyyyMMdd'),
+    [string]$Tag = "",
+    [string]$Title = "",
+    [string]$NotesFile = "",
+    [string]$Asset = "",
     [switch]$DryRun
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
+# ---- 版本信息：-Version 优先，否则读 AppScope/app.json5 ----
+$appJsonPath = Join-Path $root 'AppScope/app.json5'
+if (-not (Test-Path $appJsonPath)) { throw "找不到 $appJsonPath" }
+$appJson = [IO.File]::ReadAllText($appJsonPath, [Text.Encoding]::UTF8)
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $Version = [regex]::Match($appJson, '"versionName"\s*:\s*"([^"]+)"').Groups[1].Value
+}
+if ([string]::IsNullOrWhiteSpace($Version)) { throw "无法读取 versionName，请用 -Version 指定" }
+$versionCode = [regex]::Match($appJson, '"versionCode"\s*:\s*(\d+)').Groups[1].Value
+
+if ([string]::IsNullOrWhiteSpace($Tag)) { $Tag = "v$Version-$Date" }
+if ([string]::IsNullOrWhiteSpace($Title)) { $Title = "v$Version-$Date · HelloJson" }
+if ([string]::IsNullOrWhiteSpace($NotesFile)) { $NotesFile = "docs/RELEASE-v$Version.md" }
+
+# ---- 资产：-Asset 优先，否则按约定候选顺序查找 ----
+if ([string]::IsNullOrWhiteSpace($Asset)) {
+    $candidates = @(
+        "build-output/v$Version-$Date-unsigned.hap",
+        "build-output/HelloJson-v$Version-release.app",
+        "build-output/HelloJson-v$Version-release.hap"
+    )
+    $found = $candidates | Where-Object { Test-Path (Join-Path $root $_) } | Select-Object -First 1
+    if ($null -eq $found) {
+        throw ("找不到安装包，请先执行 scripts/build-release.ps1 或显式传 -Asset。候选：" + ($candidates -join " / "))
+    }
+    $Asset = $found
+}
+
+Write-Host "==> 版本 $Version (versionCode=$versionCode)" -ForegroundColor Cyan
+Write-Host "    tag   : $Tag"
+Write-Host "    title : $Title"
+Write-Host "    notes : $NotesFile"
+Write-Host "    asset : $Asset"
+
 $notesPath = Join-Path $root $NotesFile
 $assetPath = Join-Path $root $Asset
 if (-not (Test-Path $notesPath)) { throw "找不到说明文件: $notesPath" }
-if (-not (Test-Path $assetPath)) { throw "找不到安装包: $assetPath（可先用 hvigor 构建并签名）" }
+if (-not (Test-Path $assetPath)) { throw "找不到安装包: $assetPath（可先用 scripts/build-release.ps1 构建并签名）" }
 
 $assetName = Split-Path $assetPath -Leaf
 $assetSize = (Get-Item $assetPath).Length

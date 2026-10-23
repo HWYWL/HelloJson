@@ -8,6 +8,8 @@ export class RenderState {
   scale: number = 1;
   selectedId: string = '';
   hitPaths: Set<string> = new Set<string>();
+  /** schema 校验出错的节点路径（含祖先），描红显示 */
+  errorPaths: Set<string> = new Set<string>();
   theme: GraphTheme = new GraphTheme();
   direction: string = 'DOWN';
 }
@@ -104,11 +106,15 @@ export function renderGraph(ctx: CanvasRenderer, graph: GraphData, state: Render
     }
     const isSelected = node.id === state.selectedId;
     const isHit = state.hitPaths.has(node.path);
+    const isError = state.errorPaths.has(node.path);
     ctx.fillStyle = theme.nodeBg;
     roundRect(ctx, node.x, node.y, node.width, node.height, 7);
     ctx.fill();
     if (isSelected) {
       ctx.strokeStyle = theme.nodeBorderActive;
+      ctx.lineWidth = 2;
+    } else if (isError) {
+      ctx.strokeStyle = theme.errorColor;
       ctx.lineWidth = 2;
     } else if (isHit) {
       ctx.strokeStyle = theme.searchHit;

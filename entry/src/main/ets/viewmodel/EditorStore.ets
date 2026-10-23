@@ -15,7 +15,7 @@ import { stringifyJson, sortKeysDeep, escapeWholeText, unescapeWholeText } from 
 import { GraphData, GraphTheme, darkTheme, lightTheme } from '../core/GraphModel';
 import { GraphBuilder } from '../core/GraphBuilder';
 import { treeLayout } from '../core/TreeLayout';
-import { RenderState, renderGraph } from '../view/GraphRenderer';
+import { RenderState, findNodeByPath, renderGraph } from '../view/GraphRenderer';
 import { computeBounds } from '../core/EdgeGeometry';
 import { jqEngine, JqResult } from '../core/JqEngine';
 import { jsonPathEngine, JPathResult } from '../core/JsonPathEngine';
@@ -23,6 +23,7 @@ import { schemaGenerator, typeGenerator } from '../core/CodeGen';
 import { jsonToYaml, yamlToJson, jsonToCsv, csvToJson, jsonToXml, xmlToJson } from '../core/Convert';
 import { buildSvg } from '../core/SvgExport';
 import { DiffLine, DiffResult, diffLines } from '../core/JsonDiff';
+import { SchemaError, SchemaValidator } from '../core/SchemaValidator';
 import { AppConfig, configStore, TabRecord } from '../core/Storage';
 import { DocTab, HSpan, TabInfo, TreeItem } from './Types';
 import { SAMPLE, SAMPLE_CSV, SAMPLE_XML, SAMPLE_YAML } from './Samples';
@@ -67,6 +68,8 @@ export class EditorStore {
   urlInput: string = '';
   outputText: string = '';
   genLanguage: string = 'typescript';
+  /** Java 生成模式：false = getter/setter，true = Lombok @Data */
+  javaLombok: boolean = false;
   targetFormat: string = 'yaml';
   findVisible: boolean = false;
   findQuery: string = '';
@@ -119,6 +122,20 @@ export class EditorStore {
   /** 差异结果版本号：参与 List 的 key，保证内容变化时整表重建 */
   diffSeq: number = 0;
 
+  // ---------- JSON Schema 校验 ----------
+  /** 当前载入的 schema 文件名 */
+  schemaName: string = '';
+  /** schema 原文，切换面板后仍保留 */
+  schemaText: string = '';
+  /** 是否已经执行过校验（false 表示结果已失效或尚未校验） */
+  schemaChecked: boolean = false;
+  schemaOk: boolean = false;
+  /** 载入/校验过程中的提示（schema 解析失败、需重新校验等） */
+  schemaMessage: string = '';
+  schemaErrors: SchemaError[] = [];
+  /** 出错节点路径（含祖先），供图形视图描红 */
+  schemaErrorPaths: string[] = [];
+
   // ---------- 内部数据（不参与 UI 观察）----------
   graph: GraphData = new GraphData();
   private root: JValue | null = null;
@@ -149,6 +166,9 @@ export class EditorStore {
   };
   /** 编辑区：滚动到当前查找命中 */
   onScrollToMatch: () => void = () => {
+  };
+  /** 编辑区：滚动到指定字符偏移（schema 报错定位用） */
+  onScrollToOffset: (offset: number) => void = (offset: number) => {
   };
 
   /** 页面初始化：读配置、恢复状态、首次解析 */
@@ -649,6 +669,7 @@ export class EditorStore {
       this.spans = [];
       this.graphTruncated = false;
       this.treeTruncated = false;
+      this.invalidateSchemaResult();
       this.onRequestFit(true);
       this.refreshTabBar();
       return;
@@ -674,6 +695,7 @@ export class EditorStore {
     } else {
       this.repaint();
     }
+    this.invalidateSchemaResult();
     this.refreshTabBar();
   }
 
@@ -1292,6 +1314,229 @@ export class EditorStore {
     this.refreshTree();
   }
 
+  // ---------- JSON Schema 校验 ----------
+
+  /** 打开校验面板：已载入 schema 时立即重算一次 */
+  openSchemaCheck(): void {
+    this.modalType = 'schemaCheck';
+    this.sheetTitle = 'JSON Schema 校验';
+    this.sheetVisible = true;
+    if (this.schemaText.length > 0 && !this.schemaChecked) {
+      this.runSchemaCheck();
+    }
+  }
+
+  /** 选择本地 .json 文件作为 schema */
+  async pickSchemaFile(): Promise<void> {
+    const ctx = this.context;
+    if (ctx === null) {
+      this.toast('无法打开文件选择器');
+      return;
+    }
+    try {
+      const documentPicker = new picker.DocumentViewPicker(ctx);
+      const options = new picker.DocumentSelectOptions();
+      options.maxSelectNumber = 1;
+      const uris = await documentPicker.select(options);
+      if (uris.length === 0) {
+        return;
+      }
+      const file = fs.openSync(uris[0], fs.OpenMode.READ_ONLY);
+      const stat = fs.statSync(file.fd);
+      const buffer = new ArrayBuffer(stat.size);
+      fs.readSync(file.fd, buffer);
+      fs.closeSync(file);
+      const content = util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(buffer));
+      this.applySchema(content, this.fileNameOf(uris[0]));
+    } catch (e) {
+      this.toast('读取 schema 文件失败');
+    }
+  }
+
+  /** 载入 schema 文本并立即校验（文件选择、剪贴板共用） */
+  applySchema(text: string, name: string): void {
+    this.schemaText = text;
+    this.schemaName = name;
+    this.schemaChecked = false;
+    this.runSchemaCheck();
+  }
+
+  async pasteSchemaFromClipboard(): Promise<void> {
+    try {
+      const data = await pasteboard.getSystemPasteboard().getData();
+      const text = data.getPrimaryText();
+      if (text === undefined || text.trim().length === 0) {
+        this.toast('剪贴板为空');
+        return;
+      }
+      this.applySchema(text, '剪贴板 schema');
+    } catch (e) {
+      this.toast('读取剪贴板失败');
+    }
+  }
+
+  /** 内置演示 schema：第一次用校验功能时可以一键跑通流程 */
+  useDemoSchema(): void {
+    const demo = '{"type":"object","required":["name","version","features"],' +
+      '"properties":{"name":{"type":"string","minLength":1},' +
+      '"version":{"type":"string","enum":["1.0.0","1.1.0","2.0.0"]},' +
+      '"features":{"type":"array","minItems":3,"items":{"type":"string"}},' +
+      '"stats":{"type":"object","properties":{"stars":{"type":"integer","minimum":0}}},' +
+      '"tags":{"type":"array","items":{"type":"string"}}}}';
+    this.applySchema(demo, '内置示例 schema');
+  }
+
+  clearSchema(): void {
+    this.schemaText = '';
+    this.schemaName = '';
+    this.schemaChecked = false;
+    this.schemaOk = false;
+    this.schemaMessage = '';
+    this.schemaErrors = [];
+    this.schemaErrorPaths = [];
+    this.repaint();
+  }
+
+  runSchemaCheck(): void {
+    this.schemaErrors = [];
+    this.schemaErrorPaths = [];
+    this.schemaOk = false;
+    if (this.schemaText.trim().length === 0) {
+      this.schemaChecked = false;
+      this.schemaMessage = '尚未载入 schema';
+      this.repaint();
+      return;
+    }
+    if (this.root === null) {
+      this.schemaChecked = false;
+      this.schemaMessage = '当前文档不是有效 JSON，无法校验';
+      this.repaint();
+      return;
+    }
+    const parsed = jsonParser.parse(this.schemaText);
+    if (!parsed.ok || parsed.root === null) {
+      this.schemaChecked = false;
+      this.schemaMessage = 'schema 本身解析失败：' +
+        (parsed.error === null ? '未知错误' : parsed.error.message);
+      this.repaint();
+      return;
+    }
+    const errors = new SchemaValidator().validate(this.root, parsed.root);
+    const lines = this.linesOfOffsets(this.jsonText, errors);
+    for (let i = 0; i < errors.length; i++) {
+      errors[i].line = lines[i];
+    }
+    this.schemaErrors = errors;
+    this.schemaOk = errors.length === 0;
+    this.schemaChecked = true;
+    this.schemaMessage = '';
+    this.schemaErrorPaths = this.collectErrorPaths(errors);
+    this.repaint();
+    this.toast(this.schemaOk ? 'Schema 校验通过' :
+      ('发现 ' + errors.length.toString() + ' 处不符合 schema 的地方'));
+  }
+
+  /** 文档变化后旧结果立即失效，避免继续显示过期的红框 */
+  private invalidateSchemaResult(): void {
+    if (!this.schemaChecked && this.schemaErrors.length === 0) {
+      return;
+    }
+    this.schemaChecked = false;
+    this.schemaOk = false;
+    this.schemaErrors = [];
+    this.schemaErrorPaths = [];
+    this.schemaMessage = this.schemaText.length > 0 ? '文档已修改，请重新校验' : '';
+    this.repaint();
+  }
+
+  /** 逐个错误换算行号：先扫一遍行首偏移，再二分查找 */
+  private linesOfOffsets(text: string, errors: SchemaError[]): number[] {
+    const out: number[] = [];
+    if (errors.length === 0) {
+      return out;
+    }
+    const starts: number[] = [0];
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10) {
+        starts.push(i + 1);
+      }
+    }
+    for (let i = 0; i < errors.length; i++) {
+      const off = errors[i].offset;
+      let lo = 0;
+      let hi = starts.length - 1;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (starts[mid] <= off) {
+          lo = mid;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      out.push(lo + 1);
+    }
+    return out;
+  }
+
+  /** 父级路径：$["a.b"][2] -> $["a.b"]；$.a.b -> $.a */
+  private parentPathOf(p: string): string {
+    if (p.length <= 1) {
+      return '';
+    }
+    if (p.endsWith(']')) {
+      const open = p.lastIndexOf('[');
+      if (open > 0) {
+        return p.substring(0, open);
+      }
+    }
+    const dot = p.lastIndexOf('.');
+    if (dot > 0) {
+      return p.substring(0, dot);
+    }
+    return '$';
+  }
+
+  /** 出错节点及其全部祖先都要描红 */
+  private collectErrorPaths(errors: SchemaError[]): string[] {
+    const set: Set<string> = new Set<string>();
+    for (let i = 0; i < errors.length; i++) {
+      let p = errors[i].path;
+      while (p.length > 0) {
+        set.add(p);
+        if (p === '$') {
+          break;
+        }
+        p = this.parentPathOf(p);
+      }
+    }
+    const out: string[] = [];
+    set.forEach((p: string) => {
+      out.push(p);
+    });
+    return out;
+  }
+
+  /** 点击错误：选中对应图形节点并把编辑区滚到出错位置 */
+  gotoSchemaError(index: number): void {
+    if (index < 0 || index >= this.schemaErrors.length) {
+      return;
+    }
+    const err = this.schemaErrors[index];
+    let p = err.path;
+    let node = findNodeByPath(this.graph, p);
+    while (node === null && p !== '$') {
+      p = this.parentPathOf(p);
+      node = findNodeByPath(this.graph, p);
+    }
+    this.selectedPath = node === null ? '' : node.path;
+    this.selectedNodeId = node === null ? '' : node.id;
+    this.sheetVisible = false;
+    if (this.showEditor) {
+      this.onScrollToOffset(err.offset);
+    }
+    this.repaint();
+  }
+
   // ---------- 文件 ----------
 
   private async openFile(): Promise<void> {
@@ -1592,6 +1837,9 @@ export class EditorStore {
     if (language === 'rust') {
       return typeGenerator.rust(this.root, 'Root');
     }
+    if (language === 'java') {
+      return typeGenerator.java(this.root, 'Root', this.javaLombok);
+    }
     return typeGenerator.ts(this.root, 'Root');
   }
 
@@ -1779,6 +2027,8 @@ export class EditorStore {
       this.sheetTitle = 'JSON Schema';
       this.outputText = this.root === null ? '' : schemaGenerator.generate(this.root, 'Root');
       this.sheetVisible = true;
+    } else if (key === 'schemaCheck') {
+      this.openSchemaCheck();
     } else if (key === 'types') {
       this.modalType = 'type';
       this.sheetTitle = '类型生成';

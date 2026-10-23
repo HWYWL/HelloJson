@@ -27,6 +27,9 @@ export struct GraphPanel {
   /** 正在捏合：屏蔽单指平移，避免两套手势同时改偏移导致缩放锚点漂移 */
   private pinching: boolean = false;
   private panning: boolean = false;
+  /** schema 出错路径缓存，避免每帧重建 Set */
+  private errorPathCache: string[] = [];
+  private errorPathCacheSet: Set<string> = new Set<string>();
   private inited: boolean = false;
   /** 等待适配视图（画布尺寸变化或布局变化后） */
   private fitPending: boolean = true;
@@ -64,6 +67,30 @@ export struct GraphPanel {
     return value;
   }
 
+  /** schema 出错路径集合：数组未变化时复用上一次的 Set，避免每帧重建 */
+  private errorPathSet(): Set<string> {
+    const src = this.store.schemaErrorPaths;
+    if (src.length === this.errorPathCache.length) {
+      let same = true;
+      for (let i = 0; i < src.length; i++) {
+        if (src[i] !== this.errorPathCache[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) {
+        return this.errorPathCacheSet;
+      }
+    }
+    this.errorPathCache = src.slice();
+    const set: Set<string> = new Set<string>();
+    for (let i = 0; i < src.length; i++) {
+      set.add(src[i]);
+    }
+    this.errorPathCacheSet = set;
+    return set;
+  }
+
   private drawNow(): void {
     if (this.canvasW <= 1 || this.canvasH <= 1) {
       return;
@@ -74,6 +101,7 @@ export struct GraphPanel {
     this.renderState.direction = this.store.layoutDir;
     this.renderState.theme = this.store.theme();
     this.renderState.selectedId = this.store.selectedNodeId;
+    this.renderState.errorPaths = this.errorPathSet();
     renderGraph(this.ctx, this.store.graph, this.renderState, this.canvasW, this.canvasH);
   }
 
