@@ -10,17 +10,30 @@ export class GraphBuilder {
   private collapsed: Set<string> = new Set<string>();
   private nodeSeq: number = 1;
   private edgeSeq: number = 1;
+  /** 节点数上限，0 表示不限制（超大文档时由调用方设置，避免布局与绘制卡死） */
+  private maxNodes: number = 0;
+  private truncated: boolean = false;
 
-  build(root: JValue, collapsedPaths: Set<string>): GraphData {
+  /**
+   * @param maxNodes 节点数上限；达到上限后停止展开，并把 truncated 置为 true
+   */
+  build(root: JValue, collapsedPaths: Set<string>, maxNodes: number = 0): GraphData {
     this.graph = new GraphData();
     this.collapsed = collapsedPaths;
     this.nodeSeq = 1;
     this.edgeSeq = 1;
+    this.maxNodes = maxNodes;
+    this.truncated = false;
     if (root === null) {
       return this.graph;
     }
     this.graph.rootId = this.traverse(root, '$', false, true, 0);
     return this.graph;
+  }
+
+  /** 上一次构建是否因为节点数上限被截断 */
+  wasTruncated(): boolean {
+    return this.truncated;
   }
 
   private newId(): string {
@@ -60,6 +73,10 @@ export class GraphBuilder {
 
   private traverse(value: JValue, path: string, parentIsArray: boolean, isRoot: boolean,
     depth: number): string {
+    if (this.maxNodes > 0 && this.graph.nodes.length >= this.maxNodes) {
+      this.truncated = true;
+      return '';
+    }
     const id = this.newId();
     const node = new GraphNode();
     node.id = id;
@@ -85,6 +102,9 @@ export class GraphBuilder {
       for (let i = 0; i < count; i++) {
         const itemPath = path + '[' + i + ']';
         const childId = this.traverse(value.items[i], itemPath, true, false, depth + 1);
+        if (childId.length === 0) {
+          break;
+        }
         this.addEdge(id, childId, '');
       }
     } else if (value.kind === JKind.Obj) {
@@ -109,6 +129,9 @@ export class GraphBuilder {
             for (let j = 0; j < count; j++) {
               const itemPath = cp + '[' + j + ']';
               const childId = this.traverse(child.items[j], itemPath, true, false, depth + 1);
+              if (childId.length === 0) {
+                break;
+              }
               this.addEdge(id, childId, key);
             }
           }
@@ -127,7 +150,9 @@ export class GraphBuilder {
           rows.push(row);
           if (!isCollapsed) {
             const childId = this.traverse(child, cp, false, false, depth + 1);
-            this.addEdge(id, childId, key);
+            if (childId.length > 0) {
+              this.addEdge(id, childId, key);
+            }
           }
         } else {
           const row = new NodeRow();

@@ -227,6 +227,9 @@ export struct TopBar {
   @Builder
   toolMenu() {
     Column() {
+      this.menuItem('撤销（Ctrl+Z）', 'undo')
+      this.menuItem('重做（Ctrl+Y）', 'redo')
+      this.menuDivider()
       this.menuItem('格式化（2 空格缩进）', 'fmt2')
       this.menuItem('压缩为单行', 'fmt0')
       this.menuDivider()
@@ -249,6 +252,8 @@ export struct TopBar {
     Column() {
       this.menuItem('jq 查询', 'jq')
       this.menuItem('JSONPath 查询', 'path')
+      this.menuDivider()
+      this.menuItem('JSON 差异对比…', 'diff')
       this.menuDivider()
       this.menuItem('文本查找（Ctrl+F）', 'search')
     }

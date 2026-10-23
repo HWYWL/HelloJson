@@ -24,6 +24,9 @@ export struct GraphPanel {
   private panStartX: number = 0;
   private panStartY: number = 0;
   private lastPinchScale: number = 1;
+  /** 正在捏合：屏蔽单指平移，避免两套手势同时改偏移导致缩放锚点漂移 */
+  private pinching: boolean = false;
+  private panning: boolean = false;
   private inited: boolean = false;
   /** 等待适配视图（画布尺寸变化或布局变化后） */
   private fitPending: boolean = true;
@@ -110,10 +113,9 @@ export struct GraphPanel {
     this.store.updateZoom(this.zoomLevel);
   }
 
-  private zoomBy(factor: number): void {
+  /** 以组件内坐标 (cx, cy) 为锚点缩放：该点对应的世界坐标保持不动 */
+  private zoomAt(cx: number, cy: number, factor: number): void {
     this.userAdjusted = true;
-    const cx = this.canvasW / 2;
-    const cy = this.canvasH / 2;
     const wx = (cx - this.offsetX) / this.zoomLevel;
     const wy = (cy - this.offsetY) / this.zoomLevel;
     this.zoomLevel = this.clampScale(this.zoomLevel * factor);
@@ -121,6 +123,24 @@ export struct GraphPanel {
     this.offsetY = cy - wy * this.zoomLevel;
     this.drawNow();
     this.store.updateZoom(this.zoomLevel);
+  }
+
+  private zoomBy(factor: number): void {
+    this.zoomAt(this.canvasW / 2, this.canvasH / 2, factor);
+  }
+
+  /**
+   * 取捏合中心点（组件内坐标，vp）。
+   * 优先用两根手指在组件内的坐标平均值，比 pinchCenterX/Y 更稳，
+   * 可避免不同系统版本下中心点单位或参考原点不一致造成的锚点偏移。
+   */
+  private pinchCenter(event: GestureEvent): number[] {
+    const fingers = event.fingerList;
+    if (fingers !== undefined && fingers.length >= 2) {
+      return [(fingers[0].localX + fingers[1].localX) / 2,
+        (fingers[0].localY + fingers[1].localY) / 2];
+    }
+    return [event.pinchCenterX, event.pinchCenterY];
   }
 
   private onCanvasClick(event: ClickEvent): void {
@@ -234,29 +254,60 @@ export struct GraphPanel {
         .onClick((event: ClickEvent) => {
           this.onCanvasClick(event);
         })
+        .onAxisEvent((event: AxisEvent) => {
+          // PC 滚轮 / 触控板：以指针位置为锚点缩放
+          const v = event.getVerticalAxisValue();
+          if (Math.abs(v) < 0.001) {
+            return;
+          }
+          const factor = v > 0 ? 0.9 : 1.1;
+          this.zoomAt(event.x, event.y, factor);
+        })
         .gesture(
           GestureGroup(GestureMode.Parallel,
             PanGesture({ fingers: 1, distance: 2 })
               .onActionStart(() => {
+                if (this.pinching) {
+                  return;
+                }
                 this.userAdjusted = true;
+                this.panning = true;
                 this.panStartX = this.offsetX;
                 this.panStartY = this.offsetY;
               })
               .onActionUpdate((event: GestureEvent) => {
+                // 捏合过程中忽略平移，否则两套手势会同时改写偏移
+                if (!this.panning || this.pinching) {
+                  return;
+                }
+                // 多指按下时同样不做平移，避免捏合开始前图形先被拖走
+                const fingers = event.fingerList;
+                if (fingers !== undefined && fingers.length > 1) {
+                  return;
+                }
                 this.offsetX = this.panStartX + event.offsetX;
                 this.offsetY = this.panStartY + event.offsetY;
                 this.drawNow();
+              })
+              .onActionEnd(() => {
+                this.panning = false;
+              })
+              .onActionCancel(() => {
+                this.panning = false;
               }),
             PinchGesture({ fingers: 2 })
               .onActionStart(() => {
                 this.userAdjusted = true;
+                this.pinching = true;
+                this.panning = false;
                 this.lastPinchScale = 1;
               })
               .onActionUpdate((event: GestureEvent) => {
                 const factor = event.scale / this.lastPinchScale;
                 this.lastPinchScale = event.scale;
-                const cx = event.pinchCenterX;
-                const cy = event.pinchCenterY;
+                const center = this.pinchCenter(event);
+                const cx = center[0];
+                const cy = center[1];
                 const wx = (cx - this.offsetX) / this.zoomLevel;
                 const wy = (cy - this.offsetY) / this.zoomLevel;
                 this.zoomLevel = this.clampScale(this.zoomLevel * factor);
@@ -265,7 +316,16 @@ export struct GraphPanel {
                 this.drawNow();
               })
               .onActionEnd(() => {
+                this.pinching = false;
+                // 让后续单指拖动以当前偏移为基准，避免松手后跳变
+                this.panStartX = this.offsetX;
+                this.panStartY = this.offsetY;
                 this.store.updateZoom(this.zoomLevel);
+              })
+              .onActionCancel(() => {
+                this.pinching = false;
+                this.panStartX = this.offsetX;
+                this.panStartY = this.offsetY;
               })
           )
         )

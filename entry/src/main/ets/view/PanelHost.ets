@@ -1,4 +1,6 @@
+import { DiffLine } from '../core/JsonDiff';
 import { EditorStore } from '../viewmodel/EditorStore';
+import { TabInfo } from '../viewmodel/Types';
 import { ResultArea } from './ResultArea';
 
 /**
@@ -314,6 +316,158 @@ export struct PanelHost {
     .layoutWeight(1)
   }
 
+  /** A / B 两侧的标签选择条（外观依赖状态，写成无参 Builder） */
+  @Builder
+  diffPickers() {
+    Column() {
+      Row() {
+        Text('A')
+          .fontSize(11)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.store.theme().dimText)
+          .width(20)
+        Scroll() {
+          Row() {
+            ForEach(this.store.tabs, (t: TabInfo) => {
+              Text(t.title)
+                .fontSize(11)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .constraintSize({ maxWidth: 140 })
+                .fontColor(this.store.diffA === t.id ? this.store.theme().canvasBg : this.store.theme().text)
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                .borderRadius(5)
+                .margin({ right: 4 })
+                .backgroundColor(this.store.diffA === t.id ?
+                  this.store.theme().accent : this.store.theme().nodeBgAlt)
+                .onClick(() => this.store.setDiffSide('a', t.id))
+            }, (t: TabInfo) => 'a_' + t.id)
+          }
+        }
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+        .layoutWeight(1)
+        .align(Alignment.Start)
+      }
+      .width('100%')
+      .height(30)
+      .margin({ bottom: 6 })
+
+      Row() {
+        Text('B')
+          .fontSize(11)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.store.theme().dimText)
+          .width(20)
+        Scroll() {
+          Row() {
+            ForEach(this.store.tabs, (t: TabInfo) => {
+              Text(t.title)
+                .fontSize(11)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .constraintSize({ maxWidth: 140 })
+                .fontColor(this.store.diffB === t.id ? this.store.theme().canvasBg : this.store.theme().text)
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                .borderRadius(5)
+                .margin({ right: 4 })
+                .backgroundColor(this.store.diffB === t.id ?
+                  this.store.theme().accent : this.store.theme().nodeBgAlt)
+                .onClick(() => this.store.setDiffSide('b', t.id))
+            }, (t: TabInfo) => 'b_' + t.id)
+          }
+        }
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+        .layoutWeight(1)
+        .align(Alignment.Start)
+      }
+      .width('100%')
+      .height(30)
+      .margin({ bottom: 6 })
+    }
+    .width('100%')
+  }
+
+  @Builder
+  diffSummary() {
+    Row() {
+      Text(this.store.diffAdded === 0 && this.store.diffRemoved === 0 ?
+        '两份文档内容一致' : ('+' + this.store.diffAdded + ' 行 / −' + this.store.diffRemoved + ' 行'))
+        .fontSize(11)
+        .fontColor(this.store.diffAdded === 0 && this.store.diffRemoved === 0 ?
+          this.store.theme().successColor : this.store.theme().dimText)
+      if (this.store.diffTruncated) {
+        Text('（差异过大，仅显示前 4000 行）')
+          .fontSize(10)
+          .fontColor(this.store.theme().errorColor)
+          .margin({ left: 6 })
+      }
+      Blank()
+    }
+    .width('100%')
+    .margin({ bottom: 6 })
+  }
+
+  @Builder
+  diffList() {
+    List() {
+      ForEach(this.store.diffRows, (row: DiffLine, index: number) => {
+        ListItem() {
+          Row() {
+            Text(row.aLine === 0 ? '' : row.aLine.toString())
+              .fontSize(10)
+              .fontColor(this.store.theme().dimText)
+              .width(36)
+              .textAlign(TextAlign.End)
+              .margin({ right: 6 })
+            Text(row.bLine === 0 ? '' : row.bLine.toString())
+              .fontSize(10)
+              .fontColor(this.store.theme().dimText)
+              .width(36)
+              .textAlign(TextAlign.End)
+              .margin({ right: 6 })
+            Text(row.kind === 'add' ? '+' : (row.kind === 'del' ? '−' : ' '))
+              .fontSize(11)
+              .fontColor(row.kind === 'add' ? this.store.theme().successColor :
+                (row.kind === 'del' ? this.store.theme().errorColor : this.store.theme().dimText))
+              .width(12)
+            Text(row.text.length === 0 ? ' ' : row.text)
+              .fontSize(11)
+              .fontFamily('monospace')
+              .fontColor(row.kind === 'del' ? this.store.theme().errorColor :
+                (row.kind === 'add' ? this.store.theme().successColor : this.store.theme().text))
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          .padding({ top: 1, bottom: 1 })
+          .backgroundColor(row.kind === 'add' ? '#1A4EC9B0' :
+            (row.kind === 'del' ? '#1AF14C4C' : '#00000000'))
+        }
+      }, (row: DiffLine, index: number) => this.store.diffSeq.toString() + '_' + index.toString())
+    }
+    .layoutWeight(1)
+    .width('100%')
+    .backgroundColor(this.store.theme().canvasBg)
+    .borderRadius(8)
+    .padding(4)
+    .scrollBar(BarState.Auto)
+    .cachedCount(20)
+  }
+
+  @Builder
+  diffBody() {
+    Column() {
+      this.diffPickers()
+      this.diffSummary()
+      this.diffList()
+    }
+    .width('100%')
+    .layoutWeight(1)
+  }
+
   @Builder
   sheetContent() {
     Column() {
@@ -359,6 +513,10 @@ export struct PanelHost {
 
       if (this.store.modalType === 'convert') {
         this.convertBody()
+      }
+
+      if (this.store.modalType === 'diff') {
+        this.diffBody()
       }
     }
     .width('100%')

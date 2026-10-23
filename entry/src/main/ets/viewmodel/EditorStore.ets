@@ -22,9 +22,19 @@ import { jsonPathEngine, JPathResult } from '../core/JsonPathEngine';
 import { schemaGenerator, typeGenerator } from '../core/CodeGen';
 import { jsonToYaml, yamlToJson, jsonToCsv, csvToJson, jsonToXml, xmlToJson } from '../core/Convert';
 import { buildSvg } from '../core/SvgExport';
+import { DiffLine, DiffResult, diffLines } from '../core/JsonDiff';
 import { AppConfig, configStore, TabRecord } from '../core/Storage';
 import { DocTab, HSpan, TabInfo, TreeItem } from './Types';
 import { SAMPLE, SAMPLE_CSV, SAMPLE_XML, SAMPLE_YAML } from './Samples';
+
+/** 撤销栈最大步数 */
+const HISTORY_LIMIT: number = 60;
+/** 单条历史文本上限，超出则不记录，避免超大文档撑爆内存 */
+const HISTORY_TEXT_LIMIT: number = 262144;
+/** 连续输入的合并窗口（毫秒） */
+const HISTORY_MERGE_MS: number = 700;
+/** 树视图最多展开的条目数 */
+const TREE_ITEM_LIMIT: number = 3000;
 
 /**
  * 页面共享状态与业务逻辑。
@@ -88,6 +98,27 @@ export class EditorStore {
   /** 标签条内容签名，用于跳过无意义的刷新 */
   private tabSignature: string = '';
 
+  // ---------- 撤销 / 重做 ----------
+  /** 是否还有可撤销 / 可重做的操作（供菜单置灰） */
+  canUndo: boolean = false;
+  canRedo: boolean = false;
+  /** 图形/树视图是否因文档过大被截断 */
+  graphTruncated: boolean = false;
+  treeTruncated: boolean = false;
+
+  // ---------- JSON 差异对比 ----------
+  /** 左侧（A）标签 id */
+  diffA: string = '';
+  /** 右侧（B）标签 id */
+  diffB: string = '';
+  diffRows: DiffLine[] = [];
+  diffAdded: number = 0;
+  diffRemoved: number = 0;
+  /** 差异过大，只展示前若干行 */
+  diffTruncated: boolean = false;
+  /** 差异结果版本号：参与 List 的 key，保证内容变化时整表重建 */
+  diffSeq: number = 0;
+
   // ---------- 内部数据（不参与 UI 观察）----------
   graph: GraphData = new GraphData();
   private root: JValue | null = null;
@@ -96,6 +127,14 @@ export class EditorStore {
   /** 文本查找命中位置（字符偏移，升序） */
   private findMatches: number[] = [];
   private parseTimer: number = -1;
+  /** 激活标签的落盘节流定时器 */
+  private persistTimer: number = -1;
+  /** 每个标签独立的撤销 / 重做栈（存修改前的文本） */
+  private undoStacks: Map<string, string[]> = new Map<string, string[]>();
+  private redoStacks: Map<string, string[]> = new Map<string, string[]>();
+  /** 最近一次历史记录的时间与标签，用于合并连续输入 */
+  private lastEditAt: number = 0;
+  private lastEditTabId: string = '';
   private darkThemeRef: GraphTheme = darkTheme();
   private lightThemeRef: GraphTheme = lightTheme();
   private pendingAutoFit: boolean = false;
@@ -169,6 +208,10 @@ export class EditorStore {
   }
 
   persist(): void {
+    if (this.persistTimer >= 0) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = -1;
+    }
     this.snapshotActive();
     const records: TabRecord[] = [];
     for (let i = 0; i < this.docs.length; i++) {
@@ -185,14 +228,21 @@ export class EditorStore {
     this.refreshTabBar();
   }
 
-  /** 只保存激活标签（编辑正文时高频调用） */
+  /** 只保存激活标签（编辑正文时高频调用，做节流避免每次按键都写盘） */
   private persistActive(): void {
     this.snapshotActive();
     const d = this.activeDoc();
     if (d === null) {
       return;
     }
-    configStore.saveTab(this.toRecord(d));
+    const rec: TabRecord = this.toRecord(d);
+    if (this.persistTimer >= 0) {
+      clearTimeout(this.persistTimer);
+    }
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = -1;
+      configStore.saveTab(rec);
+    }, 600);
     this.refreshTabBar();
   }
 
@@ -260,6 +310,7 @@ export class EditorStore {
     }
     this.selectedPath = d.selectedPath;
     this.selectedNodeId = '';
+    this.updateHistoryState();
   }
 
   /** 把当前视图状态写回激活标签 */
@@ -345,6 +396,7 @@ export class EditorStore {
       this.snapshotActive();
     }
     this.docs.splice(idx, 1);
+    this.dropHistory(id);
     configStore.deleteTab(id);
     if (this.docs.length === 0) {
       const d = this.createDoc('未命名 ' + (this.tabSeq + 1).toString(), '', '');
@@ -383,6 +435,7 @@ export class EditorStore {
     }
     this.docs = remain;
     for (let i = 0; i < removed.length; i++) {
+      this.dropHistory(removed[i]);
       configStore.deleteTab(removed[i]);
     }
     this.activeTabId = id;
@@ -397,11 +450,64 @@ export class EditorStore {
     }
     this.docs = [];
     for (let i = 0; i < removed.length; i++) {
+      this.dropHistory(removed[i]);
       configStore.deleteTab(removed[i]);
     }
     const d = this.createDoc('未命名 ' + (this.tabSeq + 1).toString(), '', '');
     this.activeTabId = d.id;
     this.loadDoc(d);
+  }
+
+  // ---------- JSON 差异对比 ----------
+
+  /** 打开差异面板：默认对比当前标签与下一个标签 */
+  openDiff(): void {
+    if (this.docs.length < 2) {
+      this.toast('至少需要两个标签才能对比');
+      return;
+    }
+    this.snapshotActive();
+    this.diffA = this.activeTabId;
+    let other = '';
+    for (let i = 0; i < this.docs.length; i++) {
+      if (this.docs[i].id !== this.activeTabId) {
+        other = this.docs[i].id;
+        break;
+      }
+    }
+    this.diffB = other;
+    this.computeDiffNow();
+    this.modalType = 'diff';
+    this.sheetTitle = 'JSON 差异对比';
+    this.sheetVisible = true;
+  }
+
+  /** 切换参与对比的标签，side 为 'a' 或 'b' */
+  setDiffSide(side: string, id: string): void {
+    if (side === 'a') {
+      this.diffA = id;
+    } else {
+      this.diffB = id;
+    }
+    this.computeDiffNow();
+  }
+
+  private docText(id: string): string {
+    if (id === this.activeTabId) {
+      return this.jsonText;
+    }
+    const d = this.findDoc(id);
+    return d === null ? '' : d.text;
+  }
+
+  private computeDiffNow(): void {
+    const res: DiffResult = diffLines(this.docText(this.diffA), this.docText(this.diffB));
+    this.diffAdded = res.added;
+    this.diffRemoved = res.removed;
+    const overflow = res.lines.length > 4000;
+    this.diffTruncated = res.truncated || overflow;
+    this.diffRows = overflow ? res.lines.slice(0, 4000) : res.lines;
+    this.diffSeq++;
   }
 
   /** 在新标签中打开外部内容 */
@@ -541,6 +647,8 @@ export class EditorStore {
       this.edgeCount = 0;
       this.treeItems = [];
       this.spans = [];
+      this.graphTruncated = false;
+      this.treeTruncated = false;
       this.onRequestFit(true);
       this.refreshTabBar();
       return;
@@ -689,16 +797,59 @@ export class EditorStore {
     }
   }
 
-  /** 全局快捷键：Ctrl+F 打开查找，Esc 关闭查找 */
+  /**
+   * 全局快捷键。
+   * Ctrl+S 保存 / Ctrl+Z 撤销 / Ctrl+Shift+Z、Ctrl+Y 重做 /
+   * Ctrl+O 打开 / Ctrl+N 新建标签 / Ctrl+W 关闭标签 /
+   * Ctrl+F 查找 / Ctrl+Shift+F 格式化 / Esc 关闭查找。
+   */
   onGlobalKey(e: KeyEvent): void {
     if (e.type !== KeyType.Down) {
       return;
     }
     const ctrl = this.modState(e, 'Ctrl') || this.modState(e, 'ctrl');
-    if (ctrl && e.keyCode === KeyCode.KEYCODE_F) {
-      this.openFind();
-      e.stopPropagation();
-      return;
+    const shift = this.modState(e, 'Shift') || this.modState(e, 'shift');
+    if (ctrl) {
+      switch (e.keyCode) {
+        case KeyCode.KEYCODE_S:
+          this.saveToFile('hello-json.json', this.jsonText);
+          e.stopPropagation();
+          return;
+        case KeyCode.KEYCODE_Z:
+          if (shift) {
+            this.redo();
+          } else {
+            this.undo();
+          }
+          e.stopPropagation();
+          return;
+        case KeyCode.KEYCODE_Y:
+          this.redo();
+          e.stopPropagation();
+          return;
+        case KeyCode.KEYCODE_O:
+          this.openFile();
+          e.stopPropagation();
+          return;
+        case KeyCode.KEYCODE_N:
+          this.newTab();
+          e.stopPropagation();
+          return;
+        case KeyCode.KEYCODE_W:
+          this.closeTab(this.activeTabId);
+          e.stopPropagation();
+          return;
+        case KeyCode.KEYCODE_F:
+          if (shift) {
+            this.applyFormat(2);
+          } else {
+            this.openFind();
+          }
+          e.stopPropagation();
+          return;
+        default:
+          break;
+      }
     }
     if (this.findVisible && e.keyCode === KeyCode.KEYCODE_ESCAPE) {
       this.closeFind();
@@ -842,6 +993,7 @@ export class EditorStore {
   }
 
   loadSample(kind: string): void {
+    this.recordHistory(this.jsonText, false);
     this.clearAll();
     let root: JValue | null = null;
     if (kind === 'yaml') {
@@ -860,12 +1012,29 @@ export class EditorStore {
       ('已载入 ' + kind.toUpperCase() + ' 示例（已转为 JSON）'));
   }
 
+  /** 按文档体量选择图形节点上限，0 表示不限制 */
+  private graphNodeLimit(): number {
+    const n = this.jsonText.length;
+    if (n > 300000) {
+      return 600;
+    }
+    if (n > 80000) {
+      return 1500;
+    }
+    return 0;
+  }
+
   private rebuildGraph(): void {
     if (this.root === null) {
       return;
     }
     const builder = new GraphBuilder();
-    this.graph = builder.build(this.root, this.collapsed);
+    this.graph = builder.build(this.root, this.collapsed, this.graphNodeLimit());
+    const truncated = builder.wasTruncated();
+    if (truncated && !this.graphTruncated) {
+      this.toast('文档较大，图形仅渲染前 ' + this.graph.nodes.length.toString() + ' 个节点');
+    }
+    this.graphTruncated = truncated;
     treeLayout.layout(this.graph, this.layoutDir);
     this.nodeCount = this.graph.nodes.length;
     this.edgeCount = this.graph.edges.length;
@@ -873,14 +1042,118 @@ export class EditorStore {
   }
 
   onTextChanged(value: string): void {
+    const before = this.jsonText;
+    if (value !== before) {
+      this.recordHistory(before, true);
+    }
     this.jsonText = value;
     this.refreshTabBar();
     if (this.parseTimer >= 0) {
       clearTimeout(this.parseTimer);
     }
+    // 大文档把解析防抖拉长，避免每次按键都触发一次完整解析
+    const delay = value.length > 120000 ? 700 : 320;
     this.parseTimer = setTimeout(() => {
+      this.parseTimer = -1;
       this.parseAndRender(false);
-    }, 320);
+    }, delay);
+  }
+
+  // ---------- 撤销 / 重做 ----------
+
+  /**
+   * 记录一次可撤销的修改。
+   * coalesce 为 true 时把短时间内的连续输入合并成一步，避免每个字符一条历史。
+   */
+  private recordHistory(before: string, coalesce: boolean): void {
+    if (before.length > HISTORY_TEXT_LIMIT) {
+      return;
+    }
+    const id = this.activeTabId;
+    let stack = this.undoStacks.get(id);
+    if (stack === undefined) {
+      stack = [];
+      this.undoStacks.set(id, stack);
+    }
+    const now = Date.now();
+    if (coalesce && this.lastEditTabId === id && now - this.lastEditAt < HISTORY_MERGE_MS && stack.length > 0) {
+      this.lastEditAt = now;
+      return;
+    }
+    stack.push(before);
+    if (stack.length > HISTORY_LIMIT) {
+      stack.shift();
+    }
+    this.redoStacks.set(id, []);
+    this.lastEditAt = now;
+    this.lastEditTabId = id;
+    this.updateHistoryState();
+  }
+
+  private updateHistoryState(): void {
+    const u = this.undoStacks.get(this.activeTabId);
+    const r = this.redoStacks.get(this.activeTabId);
+    this.canUndo = u !== undefined && u.length > 0;
+    this.canRedo = r !== undefined && r.length > 0;
+  }
+
+  /** 撤销后/重做后统一回到"未合并"状态，避免紧接着的输入被吞掉 */
+  private applyHistoryText(): void {
+    this.lastEditAt = 0;
+    this.lastEditTabId = '';
+    this.parseAndRender(false);
+    this.autoFitEditorWidth();
+    this.updateHistoryState();
+  }
+
+  undo(): void {
+    const id = this.activeTabId;
+    const stack = this.undoStacks.get(id);
+    if (stack === undefined || stack.length === 0) {
+      this.toast('没有可撤销的操作');
+      return;
+    }
+    const prev = stack.pop();
+    if (prev === undefined) {
+      return;
+    }
+    let redo = this.redoStacks.get(id);
+    if (redo === undefined) {
+      redo = [];
+      this.redoStacks.set(id, redo);
+    }
+    redo.push(this.jsonText);
+    this.jsonText = prev;
+    this.applyHistoryText();
+    this.toast('已撤销');
+  }
+
+  redo(): void {
+    const id = this.activeTabId;
+    const stack = this.redoStacks.get(id);
+    if (stack === undefined || stack.length === 0) {
+      this.toast('没有可重做的操作');
+      return;
+    }
+    const next = stack.pop();
+    if (next === undefined) {
+      return;
+    }
+    let undo = this.undoStacks.get(id);
+    if (undo === undefined) {
+      undo = [];
+      this.undoStacks.set(id, undo);
+    }
+    undo.push(this.jsonText);
+    this.jsonText = next;
+    this.applyHistoryText();
+    this.toast('已重做');
+  }
+
+  /** 标签关闭时丢弃它的历史，避免 Map 长期持有大文本 */
+  private dropHistory(id: string): void {
+    this.undoStacks.delete(id);
+    this.redoStacks.delete(id);
   }
 
   /** 图形区完成绘制后回写缩放比例文案 */
@@ -965,6 +1238,10 @@ export class EditorStore {
   // ---------- 树视图 ----------
 
   private flattenTree(value: JValue, path: string, depth: number, label: string, out: TreeItem[]): void {
+    if (out.length >= TREE_ITEM_LIMIT) {
+      this.treeTruncated = true;
+      return;
+    }
     const item = new TreeItem();
     item.depth = depth;
     item.label = label;
@@ -994,10 +1271,15 @@ export class EditorStore {
   refreshTree(): void {
     if (this.root === null) {
       this.treeItems = [];
+      this.treeTruncated = false;
       return;
     }
     const items: TreeItem[] = [];
+    this.treeTruncated = false;
     this.flattenTree(this.root, '$', 0, 'root', items);
+    if (this.treeTruncated) {
+      this.toast('文档较大，树视图仅展开前 ' + items.length.toString() + ' 项');
+    }
     this.treeItems = items;
   }
 
@@ -1258,6 +1540,7 @@ export class EditorStore {
       this.toast('JSON 无效，无法格式化');
       return;
     }
+    this.recordHistory(this.jsonText, false);
     this.jsonText = stringifyJson(this.root, indent, false);
     this.parseAndRender(false);
     this.showHighlighted();
@@ -1270,6 +1553,7 @@ export class EditorStore {
       return;
     }
     const sorted = sortKeysDeep(this.root);
+    this.recordHistory(this.jsonText, false);
     this.jsonText = stringifyJson(sorted, 2, false);
     this.parseAndRender(false);
     this.showHighlighted();
@@ -1278,6 +1562,7 @@ export class EditorStore {
   }
 
   private doEscape(): void {
+    this.recordHistory(this.jsonText, false);
     this.jsonText = escapeWholeText(this.jsonText);
     this.parseAndRender(false);
     this.showHighlighted();
@@ -1286,6 +1571,7 @@ export class EditorStore {
   }
 
   private doUnescape(): void {
+    this.recordHistory(this.jsonText, false);
     this.jsonText = unescapeWholeText(this.jsonText);
     this.parseAndRender(true);
     this.showHighlighted();
@@ -1367,6 +1653,7 @@ export class EditorStore {
     if (this.outputText.length === 0) {
       return;
     }
+    this.recordHistory(this.jsonText, false);
     this.jsonText = this.outputText;
     this.parseAndRender(true);
     this.autoFitEditorWidth();
@@ -1431,7 +1718,13 @@ export class EditorStore {
   }
 
   dispatchSheet(key: string): void {
-    if (key === 'openFile') {
+    if (key === 'undo') {
+      this.undo();
+      this.sheetVisible = false;
+    } else if (key === 'redo') {
+      this.redo();
+      this.sheetVisible = false;
+    } else if (key === 'openFile') {
       this.openFile();
     } else if (key === 'paste') {
       this.pasteFromClipboard();
@@ -1441,6 +1734,7 @@ export class EditorStore {
       this.showEditor = true;
       this.samplePicker = true;
     } else if (key === 'clear') {
+      this.recordHistory(this.jsonText, false);
       this.jsonText = '';
       this.parseAndRender(true);
       this.sheetVisible = false;
@@ -1507,6 +1801,8 @@ export class EditorStore {
     } else if (key === 'copyJson') {
       this.copyText(this.jsonText);
       this.sheetVisible = false;
+    } else if (key === 'diff') {
+      this.openDiff();
     } else if (key === 'copyResult') {
       this.copyText(this.outputText);
     }
