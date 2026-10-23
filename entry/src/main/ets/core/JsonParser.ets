@@ -65,10 +65,14 @@ export class JsonParser {
 
   private countLines(text: string): number {
     let n = 1;
-    for (let i = 0; i < text.length; i++) {
-      if (text.charCodeAt(i) === 10) {
-        n++;
+    let from = 0;
+    for (;;) {
+      const idx = text.indexOf('\n', from);
+      if (idx < 0) {
+        break;
       }
+      n++;
+      from = idx + 1;
     }
     return n;
   }
@@ -147,7 +151,8 @@ export class JsonParser {
         return null;
       }
       node.text = text;
-      node.raw = this.src.substring(node.start, this.pos);
+      // 字符串节点的 raw 与 text 等价，直接复用，省掉每个字符串一次 substring 分配
+      node.raw = text;
       node.end = this.pos;
       return node;
     }
@@ -216,19 +221,26 @@ export class JsonParser {
   }
 
   private parseString(): string | null {
-    if (this.src.charAt(this.pos) !== '"') {
+    if (this.src.charCodeAt(this.pos) !== 34) {
       this.fail('期望字符串起始引号');
       return null;
     }
     this.pos++;
+    // 快路径：整段扫描到引号 / 反斜杠后一次性 substring，避免逐字符拼接（大文件下差异显著）
     let out = '';
+    let chunkStart = this.pos;
     while (this.pos < this.len) {
-      const ch = this.src.charAt(this.pos);
-      if (ch === '"') {
+      const code = this.src.charCodeAt(this.pos);
+      if (code === 34) {
+        const tail = this.src.substring(chunkStart, this.pos);
         this.pos++;
-        return out;
+        if (out.length === 0) {
+          return tail;
+        }
+        return out + tail;
       }
-      if (ch === '\\') {
+      if (code === 92) {
+        out += this.src.substring(chunkStart, this.pos);
         this.pos++;
         if (this.pos >= this.len) {
           break;
@@ -268,14 +280,13 @@ export class JsonParser {
           return null;
         }
         this.pos++;
+        chunkStart = this.pos;
         continue;
       }
-      const code = this.src.charCodeAt(this.pos);
       if (code < 0x20) {
         this.fail('字符串中包含未转义的控制字符');
         return null;
       }
-      out += ch;
       this.pos++;
     }
     this.fail('字符串未闭合');

@@ -30,7 +30,7 @@ import { DiffLine, DiffResult, diffLines } from '../core/JsonDiff';
 import { SchemaError, SchemaValidator } from '../core/SchemaValidator';
 import { MockResult, mockGenerator } from '../core/MockGen';
 import { ParquetResult, parquetReader } from '../core/Parquet';
-import { AppConfig, configStore, TabRecord } from '../core/Storage';
+import { AppConfig, configStore } from '../core/Storage';
 import { DocTab, HSpan, TabInfo, TreeDataSource, TreeItem } from './Types';
 import { SAMPLE, SAMPLE_CSV, SAMPLE_XML, SAMPLE_YAML } from './Samples';
 
@@ -50,6 +50,36 @@ const OPEN_SUFFIX_FILTER: string =
   '支持格式|.json,.jsonc,.yaml,.yml,.csv,.xml,.toml,.properties,.md,.query,.params,.parquet';
 /** schema 只接受 JSON / JSONC 文本 */
 const SCHEMA_SUFFIX_FILTER: string = 'JSON|.json,.jsonc';
+
+/** 统计 [0, limit) 内的换行数：扫 indexOf 比逐字符 charAt 快一个量级（8MB 文本从 4.2s 降到几十毫秒） */
+function countLineBreaks(text: string, limit: number): number {
+  let n = 0;
+  let from = 0;
+  for (;;) {
+    const idx = text.indexOf('\n', from);
+    if (idx < 0 || idx >= limit) {
+      break;
+    }
+    n++;
+    from = idx + 1;
+  }
+  return n;
+}
+
+/** [0, limit) 内最后一个换行的位置，没有则返回 -1 */
+function lastLineBreak(text: string, limit: number): number {
+  let last = -1;
+  let from = 0;
+  for (;;) {
+    const idx = text.indexOf('\n', from);
+    if (idx < 0 || idx >= limit) {
+      break;
+    }
+    last = idx;
+    from = idx + 1;
+  }
+  return last;
+}
 /** 打开文件时显示进度遮罩的最小体积：更小的文件读取很快，不必闪一下遮罩 */
 const OPEN_PROGRESS_MIN_BYTES: number = 262144;
 /** 分块读取的块大小（1MB），块与块之间让出主线程刷新进度 */
@@ -195,8 +225,6 @@ export class EditorStore {
   /** 与 findMatches 一一对应的命中长度（正则模式长度可变） */
   private findLengths: number[] = [];
   private parseTimer: number = -1;
-  /** 激活标签的落盘节流定时器 */
-  private persistTimer: number = -1;
   /** 每个标签独立的撤销 / 重做栈（存修改前的文本） */
   private undoStacks: Map<string, string[]> = new Map<string, string[]>();
   private redoStacks: Map<string, string[]> = new Map<string, string[]>();
@@ -234,42 +262,13 @@ export class EditorStore {
     this.editorFontSize = Math.max(10, Math.min(20, cfg.fontSize));
     this.wordWrap = cfg.wordWrap;
 
-    const records: TabRecord[] = configStore.loadTabs();
-    hilog.info(0x0000, 'HelloJson', 'init tabs=' + records.length + ' cfgActive=' + cfg.activeTabId);
-    if (records.length > 0) {
-      for (let i = 0; i < records.length; i++) {
-        const r = records[i];
-        const d = new DocTab();
-        d.id = r.id;
-        d.title = r.title;
-        d.text = r.text;
-        d.savedText = r.savedText;
-        d.collapsed = r.collapsed;
-        d.treeCollapsed = r.treeCollapsed;
-        d.selectedPath = r.selectedPath;
-        this.docs.push(d);
-      }
-      this.tabSeq = records.length;
-      let activeId = records[0].id;
-      for (let i = 0; i < records.length; i++) {
-        if (records[i].id === cfg.activeTabId) {
-          activeId = records[i].id;
-        }
-      }
-      this.activeTabId = activeId;
-    } else {
-      // 旧版本只有单份文本，迁移成第一个标签
-      const text = cfg.jsonText.length > 0 ? cfg.jsonText : SAMPLE;
-      const created = this.createDoc('未命名 1', text, text);
-      this.activeTabId = created.id;
-    }
-    const active = this.activeDoc();
-    if (active !== null) {
-      this.applyDoc(active);
-    }
+    // 重启不恢复任何已打开文件：直接丢弃上次的标签与正文，从空白标签开始，
+    // 顺便清理旧版本写到 preferences 里的大文本（否则大文件会拖慢启动、撑爆内存）
+    configStore.clearTabs();
+    const created = this.createDoc('未命名 1', '', '');
+    this.activeTabId = created.id;
+    this.applyDoc(created);
     this.refreshTabBar();
-    // 立即落盘一次，保证首次迁移/新建的标签在下次启动时能恢复
-    this.persist();
     this.parseAndRender(true);
     this.autoFitEditorWidth();
     try {
@@ -281,58 +280,16 @@ export class EditorStore {
     }
   }
 
+  /** 只持久化外观与编辑设置；标签与正文不落盘（重启一律空标签开始） */
   persist(): void {
-    if (this.persistTimer >= 0) {
-      clearTimeout(this.persistTimer);
-      this.persistTimer = -1;
-    }
-    this.snapshotActive();
-    const records: TabRecord[] = [];
-    for (let i = 0; i < this.docs.length; i++) {
-      records.push(this.toRecord(this.docs[i]));
-    }
     const cfg = new AppConfig();
     cfg.darkMode = this.darkMode;
     cfg.direction = this.layoutDir;
     cfg.viewMode = this.viewMode;
-    cfg.jsonText = this.jsonText;
-    cfg.activeTabId = this.activeTabId;
     cfg.indentWidth = this.indentWidth;
     cfg.fontSize = this.editorFontSize;
     cfg.wordWrap = this.wordWrap;
     configStore.save(cfg);
-    configStore.saveTabs(records, this.activeTabId);
-    this.refreshTabBar();
-  }
-
-  /** 只保存激活标签（编辑正文时高频调用，做节流避免每次按键都写盘） */
-  private persistActive(): void {
-    this.snapshotActive();
-    const d = this.activeDoc();
-    if (d === null) {
-      return;
-    }
-    const rec: TabRecord = this.toRecord(d);
-    if (this.persistTimer >= 0) {
-      clearTimeout(this.persistTimer);
-    }
-    this.persistTimer = setTimeout(() => {
-      this.persistTimer = -1;
-      configStore.saveTab(rec);
-    }, 600);
-    this.refreshTabBar();
-  }
-
-  private toRecord(d: DocTab): TabRecord {
-    const r = new TabRecord();
-    r.id = d.id;
-    r.title = d.title;
-    r.text = d.text;
-    r.savedText = d.savedText;
-    r.collapsed = d.collapsed;
-    r.treeCollapsed = d.treeCollapsed;
-    r.selectedPath = d.selectedPath;
-    return r;
   }
 
   // ---------- 标签管理 ----------
@@ -475,7 +432,6 @@ export class EditorStore {
     }
     this.docs.splice(idx, 1);
     this.dropHistory(id);
-    configStore.deleteTab(id);
     if (this.docs.length === 0) {
       const d = this.createDoc('未命名 ' + (this.tabSeq + 1).toString(), '', '');
       this.activeTabId = d.id;
@@ -514,7 +470,6 @@ export class EditorStore {
     this.docs = remain;
     for (let i = 0; i < removed.length; i++) {
       this.dropHistory(removed[i]);
-      configStore.deleteTab(removed[i]);
     }
     this.activeTabId = id;
     this.loadDoc(keep);
@@ -529,7 +484,6 @@ export class EditorStore {
     this.docs = [];
     for (let i = 0; i < removed.length; i++) {
       this.dropHistory(removed[i]);
-      configStore.deleteTab(removed[i]);
     }
     const d = this.createDoc('未命名 ' + (this.tabSeq + 1).toString(), '', '');
     this.activeTabId = d.id;
@@ -713,8 +667,6 @@ export class EditorStore {
 
   parseAndRender(autoFit: boolean): void {
     this.updateTextStats();
-    // 正文已定稿，先持久化激活标签，避免进程被杀后丢失
-    this.persistActive();
     if (this.jsonText.trim().length === 0) {
       // 空文档：清空图形与错误提示，避免沿用上一个标签的内容
       this.errorMsg = '';
@@ -760,12 +712,7 @@ export class EditorStore {
 
   private updateTextStats(): void {
     this.charCount = this.jsonText.length;
-    let lines = 1;
-    for (let i = 0; i < this.jsonText.length; i++) {
-      if (this.jsonText.charAt(i) === '\n') {
-        lines++;
-      }
-    }
+    const lines = countLineBreaks(this.jsonText, this.jsonText.length) + 1;
     this.lineCount = lines;
     this.rebuildLineNumbers(lines);
   }
@@ -790,19 +737,9 @@ export class EditorStore {
 
   /** 编辑区回报光标偏移，换算成行列（1 基） */
   onCaretChange(offset: number): void {
-    let line = 1;
-    let col = 1;
     const end = Math.min(offset, this.jsonText.length);
-    for (let i = 0; i < end; i++) {
-      if (this.jsonText.charAt(i) === '\n') {
-        line++;
-        col = 1;
-      } else {
-        col++;
-      }
-    }
-    this.caretLine = line;
-    this.caretColumn = col;
+    this.caretLine = countLineBreaks(this.jsonText, end) + 1;
+    this.caretColumn = end - lastLineBreak(this.jsonText, end);
   }
 
   /** 行号栏是否显示：仅关闭自动换行时显示（保证行号与内容对齐） */

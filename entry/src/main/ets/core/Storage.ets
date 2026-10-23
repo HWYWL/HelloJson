@@ -1,6 +1,5 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
-import { hilog } from '@kit.PerformanceAnalysisKit';
 
 const STORE_NAME: string = 'hello_json_config';
 /** 主题默认值修订号：从 2 开始默认浅色，老版本升级时重置一次 */
@@ -8,30 +7,20 @@ const THEME_REV: number = 2;
 /** 布局方向默认值修订号：默认方向改为「从上往下」，老配置升级时重置一次 */
 const DIRECTION_REV: number = 1;
 
+/**
+ * 只持久化外观与编辑设置。
+ * 标签与正文不再落盘：重启一律从空白标签开始，避免大文件恢复拖慢启动、撑爆内存。
+ */
 export class AppConfig {
   darkMode: boolean = false;
   direction: string = 'DOWN';
   viewMode: string = 'graph';
-  /** 仅作为旧版本兼容字段，写入当前激活标签的文本 */
-  jsonText: string = '';
-  activeTabId: string = '';
   /** 格式化缩进宽度（2 / 4 空格） */
   indentWidth: number = 2;
   /** 编辑器字号 */
   fontSize: number = 12;
   /** 编辑器自动换行 */
   wordWrap: boolean = true;
-}
-
-/** 单个标签的持久化记录 */
-export class TabRecord {
-  id: string = '';
-  title: string = '';
-  text: string = '';
-  savedText: string = '';
-  collapsed: string[] = [];
-  treeCollapsed: string[] = [];
-  selectedPath: string = '';
 }
 
 export class ConfigStore {
@@ -54,8 +43,6 @@ export class ConfigStore {
       cfg.darkMode = this.store.getSync('darkMode', false) as boolean;
       cfg.direction = this.store.getSync('direction', 'DOWN') as string;
       cfg.viewMode = this.store.getSync('viewMode', 'graph') as string;
-      cfg.jsonText = this.store.getSync('jsonText', '') as string;
-      cfg.activeTabId = this.store.getSync('activeTabId', '') as string;
       cfg.indentWidth = this.store.getSync('indentWidth', 2) as number;
       cfg.fontSize = this.store.getSync('fontSize', 12) as number;
       cfg.wordWrap = this.store.getSync('wordWrap', true) as boolean;
@@ -89,8 +76,6 @@ export class ConfigStore {
       this.store.putSync('dirRev', DIRECTION_REV);
       this.store.putSync('direction', cfg.direction);
       this.store.putSync('viewMode', cfg.viewMode);
-      this.store.putSync('jsonText', cfg.jsonText);
-      this.store.putSync('activeTabId', cfg.activeTabId);
       this.store.putSync('indentWidth', cfg.indentWidth);
       this.store.putSync('fontSize', cfg.fontSize);
       this.store.putSync('wordWrap', cfg.wordWrap);
@@ -100,92 +85,29 @@ export class ConfigStore {
     }
   }
 
-  /** 读取全部标签记录（顺序即标签条顺序） */
-  loadTabs(): TabRecord[] {
-    const out: TabRecord[] = [];
+  /**
+   * 清空历史版本残留的标签 / 正文数据。
+   * 启动时调用：不恢复任何已打开文件，顺手把旧版本写下的大文本删掉，回收存储空间。
+   */
+  clearTabs(): void {
     if (this.store === null) {
-      return out;
+      return;
     }
     try {
       const ids = this.store.getSync('tabIds', []) as string[];
       for (let i = 0; i < ids.length; i++) {
         const id = ids[i];
-        const rec = new TabRecord();
-        rec.id = id;
-        rec.title = this.store.getSync('tab.' + id + '.title', '') as string;
-        rec.text = this.store.getSync('tab.' + id + '.text', '') as string;
-        rec.savedText = this.store.getSync('tab.' + id + '.savedText', '') as string;
-        rec.collapsed = this.store.getSync('tab.' + id + '.collapsed', []) as string[];
-        rec.treeCollapsed = this.store.getSync('tab.' + id + '.treeCollapsed', []) as string[];
-        rec.selectedPath = this.store.getSync('tab.' + id + '.selectedPath', '') as string;
-        out.push(rec);
+        this.store.deleteSync('tab.' + id + '.title');
+        this.store.deleteSync('tab.' + id + '.text');
+        this.store.deleteSync('tab.' + id + '.savedText');
+        this.store.deleteSync('tab.' + id + '.collapsed');
+        this.store.deleteSync('tab.' + id + '.treeCollapsed');
+        this.store.deleteSync('tab.' + id + '.selectedPath');
       }
-    } catch (e) {
-      hilog.error(0x0000, 'HelloJson', 'loadTabs failed');
-      return out;
-    }
-    hilog.info(0x0000, 'HelloJson', 'loadTabs count=' + out.length);
-    return out;
-  }
-
-  /** 保存全部标签与当前激活标签 */
-  saveTabs(tabs: TabRecord[], activeId: string): void {
-    if (this.store === null) {
-      return;
-    }
-    try {
-      const ids: string[] = [];
-      for (let i = 0; i < tabs.length; i++) {
-        const t = tabs[i];
-        ids.push(t.id);
-        this.store.putSync('tab.' + t.id + '.title', t.title);
-        this.store.putSync('tab.' + t.id + '.text', t.text);
-        this.store.putSync('tab.' + t.id + '.savedText', t.savedText);
-        this.store.putSync('tab.' + t.id + '.collapsed', t.collapsed);
-        this.store.putSync('tab.' + t.id + '.treeCollapsed', t.treeCollapsed);
-        this.store.putSync('tab.' + t.id + '.selectedPath', t.selectedPath);
-      }
-      this.store.putSync('tabIds', ids);
-      this.store.putSync('activeTabId', activeId);
+      this.store.putSync('tabIds', []);
+      this.store.deleteSync('activeTabId');
+      this.store.deleteSync('jsonText');
       this.store.flush();
-      hilog.info(0x0000, 'HelloJson', 'saveTabs count=' + ids.length + ' active=' + activeId);
-    } catch (e) {
-      hilog.error(0x0000, 'HelloJson', 'saveTabs failed');
-      return;
-    }
-  }
-
-  /** 只保存单个标签（编辑正文时高频调用，避免重写全部标签） */
-  saveTab(rec: TabRecord): void {
-    if (this.store === null) {
-      return;
-    }
-    try {
-      this.store.putSync('tab.' + rec.id + '.title', rec.title);
-      this.store.putSync('tab.' + rec.id + '.text', rec.text);
-      this.store.putSync('tab.' + rec.id + '.savedText', rec.savedText);
-      this.store.putSync('tab.' + rec.id + '.collapsed', rec.collapsed);
-      this.store.putSync('tab.' + rec.id + '.treeCollapsed', rec.treeCollapsed);
-      this.store.putSync('tab.' + rec.id + '.selectedPath', rec.selectedPath);
-      this.store.flush();
-    } catch (e) {
-      hilog.error(0x0000, 'HelloJson', 'saveTab failed');
-      return;
-    }
-  }
-
-  /** 关闭标签后清理它的持久化数据 */
-  deleteTab(id: string): void {
-    if (this.store === null) {
-      return;
-    }
-    try {
-      this.store.deleteSync('tab.' + id + '.title');
-      this.store.deleteSync('tab.' + id + '.text');
-      this.store.deleteSync('tab.' + id + '.savedText');
-      this.store.deleteSync('tab.' + id + '.collapsed');
-      this.store.deleteSync('tab.' + id + '.treeCollapsed');
-      this.store.deleteSync('tab.' + id + '.selectedPath');
     } catch (e) {
       return;
     }
