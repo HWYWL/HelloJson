@@ -19,9 +19,9 @@
 | 代码生成 | JSON Schema (draft-07)、TypeScript / Go / Kotlin / Rust / Java / C# / Swift / Dart 类型定义（Java 可选 getter/setter 或 Lombok `@Data`；TypeScript 可选字段 / export；可按已载入 schema 推断类型） |
 | Schema 校验 | 载入自定义 schema 校验当前文档，错误带 JSON 路径与行号；点击定位到图形节点，出错节点及其祖先描红；可按 schema 生成示例数据（枚举/范围/必填/数组长度/$ref） |
 | 格式转换 | JSON ⇄ YAML / CSV / XML / TOML / Properties / URL 查询串 / Markdown 表格（双向，可写回编辑器） |
-| 导入导出 | 文件导入（自动识别 .json/.yaml/.csv/.xml/.toml/.properties/.md/.query）、拖拽文件或文本导入、URL 导入、剪贴板粘贴、保存 JSON、导出 SVG（整图矢量）/ PNG / JPEG |
+| 导入导出 | 文件导入（文件选择器只列出支持的后缀：.json/.jsonc/.yaml/.yml/.csv/.xml/.toml/.properties/.md/.query/.params/.parquet，自动识别格式）、Parquet 导入（扁平表，snappy / 不压缩，整表展开为 JSON 数组，超过 20 万行截断提示）、拖拽文件或文本导入、URL 导入、剪贴板粘贴、保存 JSON、导出 SVG（整图矢量）/ PNG / JPEG |
 | 其他 | 深色/浅色主题、横竖屏自适应分栏、全屏图形模式、弹窗标题栏可拖动且限制在可视区域内、配置与内容本地持久化 |
-| 大文档 | 按文档体量自动降级：解析防抖拉长、图形节点数截断（80K 字符以上最多 1500 节点，300K 以上 600 节点）、树视图 LazyForEach 懒加载（最多 3000 项）、语法高亮 40K 字符以上关闭、落盘节流 |
+| 大文档 | 打开文件时按体积显示进度遮罩（分块读取已读百分比 + 解析提示），超过 12MB 的文本文件直接提示而不载入（避免内存溢出）；按文档体量自动降级：解析防抖拉长、图形节点数截断（80K 字符以上最多 1500 节点，300K 以上 600 节点）、树视图 LazyForEach 懒加载（最多 3000 项）、语法高亮 40K 字符以上关闭、落盘节流 |
 
 ## 更新记录
 
@@ -51,6 +51,8 @@
 
 - 格式转换新增 TOML / Properties / URL 查询串 / Markdown 表格，均为 JSON 双向
 - 文件导入识别 `.toml` / `.properties` / `.md` / `.query`，支持拖拽文件或文本导入
+- 打开文件的选择器按支持格式过滤（`fileSuffixFilters`），只显示可导入的文件
+- Parquet 导入：扁平表 + snappy / 不压缩，支持字典编码、DECIMAL、DATE / TIMESTAMP，整表展开为 JSON 数组（超 20 万行截断提示）
 - JSON 差异对比（双标签行级 diff、增删统计、超大差异截断）
 
 **其他**
@@ -104,6 +106,7 @@ entry/src/main/ets/
 │   ├── CodeGen.ets      Schema / 类型生成（8 种语言）
 │   ├── MockGen.ets      Schema → 示例数据
 │   ├── SchemaValidator.ets  Schema 校验（draft-07 子集）
+│   ├── Parquet.ets      Parquet 读取（Thrift 元数据 / snappy / RLE，扁平表转 JSON）
 │   ├── Convert.ets      YAML / CSV / XML / TOML / Properties / 查询串 / Markdown 互转 + 搜索
 │   ├── SvgExport.ets    SVG 导出
 │   └── Storage.ets      preferences 持久化

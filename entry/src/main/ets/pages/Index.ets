@@ -6,6 +6,7 @@ import { GraphPanel } from '../view/GraphPanel';
 import { Splitter } from '../view/Splitter';
 import { BottomBar } from '../view/BottomBar';
 import { PanelHost } from '../view/PanelHost';
+import { BusyOverlay } from '../view/BusyOverlay';
 
 /**
  * 页面只负责布局编排与生命周期：
@@ -60,6 +61,10 @@ struct Index {
             this.store.sheetVisible = false;
           })
         PanelHost()
+      }
+
+      if (this.store.busyText.length > 0) {
+        BusyOverlay()
       }
     }
     .width('100%')

@@ -29,6 +29,7 @@ import { buildSvg } from '../core/SvgExport';
 import { DiffLine, DiffResult, diffLines } from '../core/JsonDiff';
 import { SchemaError, SchemaValidator } from '../core/SchemaValidator';
 import { MockResult, mockGenerator } from '../core/MockGen';
+import { ParquetResult, parquetReader } from '../core/Parquet';
 import { AppConfig, configStore, TabRecord } from '../core/Storage';
 import { DocTab, HSpan, TabInfo, TreeDataSource, TreeItem } from './Types';
 import { SAMPLE, SAMPLE_CSV, SAMPLE_XML, SAMPLE_YAML } from './Samples';
@@ -41,6 +42,22 @@ const HISTORY_TEXT_LIMIT: number = 262144;
 const HISTORY_MERGE_MS: number = 700;
 /** 树视图最多展开的条目数 */
 const TREE_ITEM_LIMIT: number = 3000;
+/**
+ * 「打开文件」选择器可见的后缀白名单，与 openUri / normalizeImport 实际支持的格式保持一致。
+ * 注意：fileSuffixFilters 数组总长度不能超过 100 字符。
+ */
+const OPEN_SUFFIX_FILTER: string =
+  '支持格式|.json,.jsonc,.yaml,.yml,.csv,.xml,.toml,.properties,.md,.query,.params,.parquet';
+/** schema 只接受 JSON / JSONC 文本 */
+const SCHEMA_SUFFIX_FILTER: string = 'JSON|.json,.jsonc';
+/** 打开文件时显示进度遮罩的最小体积：更小的文件读取很快，不必闪一下遮罩 */
+const OPEN_PROGRESS_MIN_BYTES: number = 262144;
+/** 分块读取的块大小（1MB），块与块之间让出主线程刷新进度 */
+const READ_CHUNK_BYTES: number = 1048576;
+/** Parquet 整表导入的体积上限（80MB） */
+const PARQUET_MAX_BYTES: number = 83886080;
+/** 文本文件整表载入的体积上限：再大容易撑爆 JS 堆（16MB 以上实测会 OutOfMemory 退出） */
+const TEXT_IMPORT_MAX_BYTES: number = 12582912;
 
 /**
  * 页面共享状态与业务逻辑。
@@ -100,6 +117,10 @@ export class EditorStore {
   /** 树视图懒加载数据源（LazyForEach 用） */
   treeData: TreeDataSource = new TreeDataSource();
   busy: boolean = false;
+  /** 进度遮罩文案：非空时显示「正在打开 / 解析」遮罩 */
+  busyText: string = '';
+  /** 遮罩进度（0-1），负数表示不确定进度 */
+  busyProgress: number = -1;
   /** 编辑器设置：格式化缩进宽度（2 / 4 空格） */
   indentWidth: number = 2;
   /** 编辑器字号 */
@@ -1525,6 +1546,7 @@ export class EditorStore {
       const documentPicker = new picker.DocumentViewPicker(ctx);
       const options = new picker.DocumentSelectOptions();
       options.maxSelectNumber = 1;
+      options.fileSuffixFilters = [SCHEMA_SUFFIX_FILTER];
       const uris = await documentPicker.select(options);
       if (uris.length === 0) {
         return;
@@ -1754,38 +1776,165 @@ export class EditorStore {
       const documentPicker = new picker.DocumentViewPicker(ctx);
       const options = new picker.DocumentSelectOptions();
       options.maxSelectNumber = 1;
+      options.fileSuffixFilters = [OPEN_SUFFIX_FILTER];
       const uris = await documentPicker.select(options);
       if (uris.length === 0) {
         return;
       }
-      this.openUri(uris[0]);
+      await this.openUri(uris[0]);
     } catch (e) {
       this.toast('打开文件失败');
     }
   }
 
-  /** 按 uri 读取文本并作为新标签打开（打开文件 / 拖拽导入共用） */
-  private openUri(uri: string): void {
+  /**
+   * 按 uri 读取并作为新标签打开（打开文件 / 拖拽导入共用）。
+   * 大文件分块读取并显示进度遮罩，避免等待期间没有任何反馈被误认为打开失败。
+   */
+  private async openUri(uri: string): Promise<boolean> {
+    const name = this.fileNameOf(uri);
+    const lower = uri.toLowerCase();
+    const isParquet = lower.endsWith('.parquet') || lower.endsWith('.pq');
+    let file: fs.File | null = null;
     try {
-      const file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
-      const stat = fs.statSync(file.fd);
-      const buffer = new ArrayBuffer(stat.size);
-      fs.readSync(file.fd, buffer);
-      fs.closeSync(file);
+      file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+      const size = fs.statSync(file.fd).size;
+      if (isParquet && size > PARQUET_MAX_BYTES) {
+        this.toast('Parquet 文件超过 80MB，暂不支持整表导入');
+        return false;
+      }
+      if (!isParquet && size > TEXT_IMPORT_MAX_BYTES) {
+        this.toast('文件超过 12MB，为避免内存不足已取消打开');
+        return false;
+      }
+      const heavy = size >= OPEN_PROGRESS_MIN_BYTES;
+      if (heavy) {
+        this.setBusyHint('正在打开 ' + name, -1);
+        // 先让遮罩绘制出来，再开始读取，否则首个同步动作会把首帧一起堵住
+        await this.yieldUi(48);
+      }
+      const buffer = await this.readFileBuffer(file, size, name);
+      if (heavy) {
+        this.setBusyHint('正在解析 ' + name, -1);
+        // 解析是主线程上的同步重活，这里先给足几帧让转圈动画真正转起来
+        await this.yieldUi(120);
+      }
+      if (isParquet) {
+        return this.applyParquet(name, buffer);
+      }
       const content = util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(buffer));
-      this.openDoc(this.fileNameOf(uri), this.normalizeImport(uri, content));
+      this.openDoc(name, this.normalizeImport(uri, content));
       this.autoFitEditorWidth();
       this.sheetVisible = false;
+      return true;
     } catch (e) {
-      this.toast('文件读取失败');
+      this.toast(isParquet ? 'Parquet 读取失败' : '文件读取失败');
+      return false;
+    } finally {
+      this.closeQuietly(file);
+      this.clearBusyHint();
+    }
+  }
+
+  /** 分块异步读取整文件，每块结束后刷新进度，给界面留出重绘机会 */
+  private async readFileBuffer(file: fs.File, size: number, name: string): Promise<ArrayBuffer> {
+    const buffer = new ArrayBuffer(size);
+    if (size <= 0) {
+      return buffer;
+    }
+    try {
+      if (size <= READ_CHUNK_BYTES) {
+        fs.readSync(file.fd, buffer);
+        return buffer;
+      }
+      const dst = new Uint8Array(buffer);
+      const chunk = new ArrayBuffer(READ_CHUNK_BYTES);
+      const src = new Uint8Array(chunk);
+      let pos = 0;
+      while (pos < size) {
+        const want = Math.min(READ_CHUNK_BYTES, size - pos);
+        const got = await fs.read(file.fd, chunk, { offset: pos, length: want });
+        if (got <= 0) {
+          break;
+        }
+        dst.set(got === READ_CHUNK_BYTES ? src : src.subarray(0, got), pos);
+        pos += got;
+        const ratio = pos / size;
+        this.setBusyHint('正在打开 ' + name + ' ' + Math.floor(ratio * 100) + '%', ratio);
+      }
+      return buffer;
+    } catch (e) {
+      // 统一由调用方提示「文件读取失败」
+      throw new Error('read file failed');
+    }
+  }
+
+  /** Parquet 是二进制列式格式：整表展开成 JSON 数组后打开 */
+  private applyParquet(name: string, buffer: ArrayBuffer): boolean {
+    try {
+      const res: ParquetResult = parquetReader.parse(buffer);
+      if (!res.ok) {
+        this.toast('Parquet 解析失败：' + res.message);
+        return false;
+      }
+      const arr = JValue.ofArr();
+      for (let i = 0; i < res.rows.length; i++) {
+        arr.items.push(res.rows[i]);
+      }
+      this.openDoc(name, stringifyJson(arr, this.indentWidth, false));
+      this.autoFitEditorWidth();
+      this.sheetVisible = false;
+      if (res.truncated) {
+        this.toast('已导入前 ' + res.rowCount + ' 行（表内共 ' + res.totalRows + ' 行）');
+      } else {
+        this.toast('已导入 ' + res.rowCount + ' 行 × ' + res.columns.length + ' 列');
+      }
+      return true;
+    } catch (e) {
+      this.toast('Parquet 解析失败');
+      return false;
+    }
+  }
+
+  /** 设置进度遮罩：text 非空即显示，progress < 0 表示不确定进度 */
+  private setBusyHint(text: string, progress: number): void {
+    this.busy = true;
+    this.busyText = text;
+    this.busyProgress = progress;
+  }
+
+  /** 收起进度遮罩 */
+  private clearBusyHint(): void {
+    this.busy = false;
+    this.busyText = '';
+    this.busyProgress = -1;
+  }
+
+  /** 让出主线程，保证遮罩先绘制再继续耗时逻辑 */
+  private async yieldUi(ms: number): Promise<void> {
+    await new Promise<void>((resolve: () => void) => {
+      setTimeout(() => {
+        resolve();
+      }, ms);
+    });
+  }
+
+  /** 关闭文件句柄，忽略关闭异常 */
+  private closeQuietly(file: fs.File | null): void {
+    if (file === null) {
+      return;
+    }
+    try {
+      fs.closeSync(file);
+    } catch (e) {
+      hilog.warn(0x0000, 'HelloJson', 'close file failed');
     }
   }
 
   /** 拖拽导入：优先按文件 uri 读取，其次使用拖入的纯文本 */
   async importDropped(uri: string, text: string): Promise<void> {
     if (uri.length > 0) {
-      this.openUri(uri);
-      this.toast('已导入 ' + this.fileNameOf(uri));
+      await this.openUri(uri);
       return;
     }
     if (text.length > 0) {
