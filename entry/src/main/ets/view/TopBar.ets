@@ -1,4 +1,5 @@
 import { EditorStore } from '../viewmodel/EditorStore';
+import { RecentFile } from '../core/Storage';
 
 /**
  * 顶栏：品牌、文件/工具/查询/生成/导出菜单、格式化与折叠、视图切换、主题与编辑区开关。
@@ -208,6 +209,33 @@ export struct TopBar {
   fileMenu() {
     Column() {
       this.menuItem('打开文件…', 'openFile')
+      if (this.store.recentFiles.length > 0) {
+        Text('最近打开')
+          .fontSize(11)
+          .fontColor(this.store.theme().dimText)
+          .width('100%')
+          .padding({ left: 14, right: 14, top: 6, bottom: 2 })
+        ForEach(this.store.recentFiles, (item: RecentFile) => {
+          Row() {
+            Text(item.name)
+              .fontSize(14)
+              .fontColor(this.store.theme().text)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+          }
+          .width('100%')
+          .height(34)
+          .padding({ left: 14, right: 14 })
+          .borderRadius(6)
+          .hoverEffect(HoverEffect.Highlight)
+          .onClick(() => {
+            this.store.openRecent(item);
+          })
+        }, (item: RecentFile) => item.uri)
+        this.menuItem('清空最近记录', 'recentClear')
+        this.menuDivider()
+      }
       this.menuItem('从 URL 导入…', 'url')
       this.menuItem('从剪贴板粘贴', 'paste')
       this.menuDivider()

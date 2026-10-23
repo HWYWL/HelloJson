@@ -2,6 +2,7 @@ import { common, bundleManager } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
+import { fileShare } from '@kit.CoreFileKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { image } from '@kit.ImageKit';
 import { promptAction } from '@kit.ArkUI';
@@ -30,7 +31,7 @@ import { DiffLine, DiffResult, diffLines } from '../core/JsonDiff';
 import { SchemaError, SchemaValidator } from '../core/SchemaValidator';
 import { MockResult, mockGenerator } from '../core/MockGen';
 import { ParquetResult, parquetReader } from '../core/Parquet';
-import { AppConfig, configStore } from '../core/Storage';
+import { AppConfig, configStore, RecentFile } from '../core/Storage';
 import { DocTab, HSpan, TabInfo, TreeDataSource, TreeItem } from './Types';
 import { SAMPLE, SAMPLE_CSV, SAMPLE_XML, SAMPLE_YAML } from './Samples';
 
@@ -42,6 +43,12 @@ const HISTORY_TEXT_LIMIT: number = 262144;
 const HISTORY_MERGE_MS: number = 700;
 /** 树视图最多展开的条目数 */
 const TREE_ITEM_LIMIT: number = 3000;
+/** 编辑区（TextArea）能承载的文本上限，超过后改为只读预览，避免被静默截断 */
+const MAX_EDITABLE_CHARS: number = 1000000;
+/** 只读预览显示的字符数 */
+const LARGE_PREVIEW_CHARS: number = 200000;
+/** 最近打开列表保留条数 */
+const RECENT_MAX: number = 5;
 /**
  * 「打开文件」选择器可见的后缀白名单，与 openUri / normalizeImport 实际支持的格式保持一致。
  * 注意：fileSuffixFilters 数组总长度不能超过 100 字符。
@@ -171,6 +178,10 @@ export class EditorStore {
   /** 片段版本号，变化时强制重建 Span（查找高亮切换用） */
   spanSeq: number = 0;
 
+  // ---------- 最近打开 ----------
+  /** 最近打开的文件（只存 uri 与显示名，重启后可直接重开） */
+  recentFiles: RecentFile[] = [];
+
   // ---------- 标签 ----------
   /** 标签条展示数据：整组重建，保证 UI 能观察到变化 */
   tabs: TabInfo[] = [];
@@ -265,6 +276,7 @@ export class EditorStore {
     // 重启不恢复任何已打开文件：直接丢弃上次的标签与正文，从空白标签开始，
     // 顺便清理旧版本写到 preferences 里的大文本（否则大文件会拖慢启动、撑爆内存）
     configStore.clearTabs();
+    this.recentFiles = configStore.loadRecent();
     const created = this.createDoc('未命名 1', '', '');
     this.activeTabId = created.id;
     this.applyDoc(created);
@@ -1724,6 +1736,58 @@ export class EditorStore {
     }
   }
 
+  /** 打开「最近打开」里的文件：先激活持久化授权，再走统一的读取流程 */
+  async openRecent(item: RecentFile): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    try {
+      await fileShare.activatePermission([{ uri: item.uri, operationMode: fileShare.OperationMode.READ_MODE }]);
+    } catch (e) {
+      // 授权失败也继续尝试读取，真正失败时 openUri 会给出提示
+    }
+    await this.openUri(item.uri);
+  }
+
+  clearRecent(): void {
+    this.recentFiles = [];
+    configStore.saveRecent([]);
+    this.toast('已清空最近打开记录');
+  }
+
+  /** 记录到最近打开列表，并申请持久化读权限，重启后仍可直接重开 */
+  private addRecent(uri: string, name: string): void {
+    const list: RecentFile[] = [];
+    const head = new RecentFile();
+    head.uri = uri;
+    head.name = name;
+    list.push(head);
+    for (let i = 0; i < this.recentFiles.length && list.length < RECENT_MAX; i++) {
+      if (this.recentFiles[i].uri !== uri) {
+        list.push(this.recentFiles[i]);
+      }
+    }
+    this.recentFiles = list;
+    configStore.saveRecent(list);
+    fileShare.persistPermission([{ uri: uri, operationMode: fileShare.OperationMode.READ_MODE }])
+      .catch((e: BusinessError) => {
+        hilog.warn(0x0000, 'HelloJson', 'persistPermission failed code=' + e.code);
+      });
+  }
+
+  /** 文本超过编辑区上限（100 万字符）：改为只读预览，避免 TextArea 静默截断正文 */
+  textReadOnly(): boolean {
+    return this.jsonText.length > MAX_EDITABLE_CHARS;
+  }
+
+  /** 大文本只读预览内容：只取前 20 万字符，避免一次性布局几十万字符卡住 UI */
+  largeTextPreview(): string {
+    if (this.jsonText.length <= LARGE_PREVIEW_CHARS) {
+      return this.jsonText;
+    }
+    return this.jsonText.substring(0, LARGE_PREVIEW_CHARS);
+  }
+
   /**
    * 按 uri 读取并作为新标签打开（打开文件 / 拖拽导入共用）。
    * 大文件分块读取并显示进度遮罩，避免等待期间没有任何反馈被误认为打开失败。
@@ -1757,12 +1821,17 @@ export class EditorStore {
         await this.yieldUi(120);
       }
       if (isParquet) {
-        return this.applyParquet(name, buffer);
+        const okParquet = this.applyParquet(name, buffer);
+        if (okParquet) {
+          this.addRecent(uri, name);
+        }
+        return okParquet;
       }
       const content = util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(buffer));
       this.openDoc(name, this.normalizeImport(uri, content));
       this.autoFitEditorWidth();
       this.sheetVisible = false;
+      this.addRecent(uri, name);
       return true;
     } catch (e) {
       this.toast(isParquet ? 'Parquet 读取失败' : '文件读取失败');
@@ -2381,6 +2450,8 @@ export class EditorStore {
     } else if (key === 'samplePick') {
       this.showEditor = true;
       this.samplePicker = true;
+    } else if (key === 'recentClear') {
+      this.clearRecent();
     } else if (key === 'clear') {
       this.recordHistory(this.jsonText, false);
       this.jsonText = '';

@@ -428,6 +428,43 @@ export struct EditorPanel {
     .border({ width: 0.5, color: this.store.darkMode ? '#454549' : '#d8dee5' })
   }
 
+  /**
+   * 超长文本（> 100 万字符）只读预览：
+   * TextArea 静默只保留 100 万字符，继续绑定会把正文截断并报「字符串未闭合」，
+   * 所以这里不再挂 TextArea，只做只读展示；完整内容仍在内存里，可正常保存/导出。
+   */
+  @Builder
+  largeTextView() {
+    Column() {
+      Row() {
+        Text('文档超过 100 万字符，编辑区改为只读预览（显示前 20 万字符）；完整内容仍可保存 / 导出')
+          .fontSize(11)
+          .fontColor(this.store.theme().dimText)
+          .maxLines(2)
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+      .backgroundColor(this.store.darkMode ? '#3a3a3c' : '#fff6de')
+
+      Scroll() {
+        Text(this.store.largeTextPreview())
+          .fontSize(this.store.editorFontSize)
+          .fontFamily('monospace')
+          .fontColor(this.store.theme().text)
+          .width('100%')
+          .padding(10)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .align(Alignment.TopStart)
+      .scrollBar(BarState.Auto)
+      .backgroundColor(this.store.theme().canvasBg)
+    }
+    .width('100%')
+    .layoutWeight(1)
+  }
+
   build() {
     Column() {
       this.tabBar()
@@ -462,6 +499,8 @@ export struct EditorPanel {
 
       if (this.store.samplePicker) {
         this.samplePickerPanel()
+      } else if (this.store.textReadOnly()) {
+        this.largeTextView()
       } else if (this.store.highlighted) {
         this.highlightView()
       } else {

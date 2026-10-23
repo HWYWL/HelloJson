@@ -23,6 +23,12 @@ export class AppConfig {
   wordWrap: boolean = true;
 }
 
+/** 最近打开的文件（只存 uri 与显示名，不存正文） */
+export class RecentFile {
+  uri: string = '';
+  name: string = '';
+}
+
 export class ConfigStore {
   private store: preferences.Preferences | null = null;
 
@@ -79,6 +85,45 @@ export class ConfigStore {
       this.store.putSync('indentWidth', cfg.indentWidth);
       this.store.putSync('fontSize', cfg.fontSize);
       this.store.putSync('wordWrap', cfg.wordWrap);
+      this.store.flush();
+    } catch (e) {
+      return;
+    }
+  }
+
+  /** 读取最近打开列表（最近的在最前） */
+  loadRecent(): RecentFile[] {
+    const out: RecentFile[] = [];
+    if (this.store === null) {
+      return out;
+    }
+    try {
+      const raw = this.store.getSync('recentFiles', '') as string;
+      if (raw.length === 0) {
+        return out;
+      }
+      const parsed = JSON.parse(raw) as RecentFile[];
+      for (let i = 0; i < parsed.length; i++) {
+        const item = new RecentFile();
+        item.uri = parsed[i].uri;
+        item.name = parsed[i].name;
+        if (item.uri.length > 0) {
+          out.push(item);
+        }
+      }
+    } catch (e) {
+      return out;
+    }
+    return out;
+  }
+
+  /** 保存最近打开列表 */
+  saveRecent(list: RecentFile[]): void {
+    if (this.store === null) {
+      return;
+    }
+    try {
+      this.store.putSync('recentFiles', JSON.stringify(list));
       this.store.flush();
     } catch (e) {
       return;
